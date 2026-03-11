@@ -608,6 +608,13 @@ const store = {
 let API_BASE = store.get('api_base');
 let API_KEY  = store.get('api_key');
 
+// ── CLIPBOARD REGISTRY ────────────────────────────────────────────
+// Stocke les textes longs ici pour éviter les problèmes d'échappement dans onclick
+const _clip = {};
+let _clipIdx = 0;
+function clipStore(text) { const id = 'c' + (++_clipIdx); _clip[id] = text; return id; }
+function clipCopy(id) { const t = _clip[id] || ''; navigator.clipboard.writeText(t).then(() => toast('Copié !', 'success')).catch(() => { try { const el = Object.assign(document.createElement('textarea'), {value:t}); document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); toast('Copié !', 'success'); } catch(e) { toast('Erreur copie', 'error'); } }); }
+
 // Init inputs
 document.getElementById('api-url-input').value = API_BASE;
 document.getElementById('api-key-input').value  = API_KEY;
@@ -679,41 +686,69 @@ function toast(msg, type='') {
 async function checkHealth() {
   const dot = document.getElementById('status-dot');
   const lbl = document.getElementById('status-label');
-  // Guard : si pas d'URL configurée, afficher un état neutre et arrêter
   if (!API_BASE) {
     dot.className = 'status-dot';
-    lbl.textContent = 'URL non configurée';
+    lbl.textContent = 'URL non configuree — colle ton URL Render ci-dessus';
     const out = document.getElementById('health-output');
-    if (out) out.textContent = 'Configure l\'URL de l\'API backend dans le champ ci-dessus, puis clique sur "Tester ✓"';
+    if (out) out.textContent = 'Colle https://datalinkedai.onrender.com dans le champ URL puis clique Tester';
     return;
   }
+
   dot.className = 'status-dot';
-  lbl.textContent = 'Vérification...';
+  lbl.textContent = '⏳ Connexion...';
+
+  // Compte a rebours — Render Free peut dormir jusqu'a 60s
+  let secs = 0;
+  const ticker = setInterval(() => {
+    secs++;
+    if (secs < 60) {
+      lbl.textContent = '⏳ Reveil app Render... ' + secs + 's (patiente jusqu'a 60s)';
+    }
+  }, 1000);
+
+  // Timeout 70s via AbortController
+  const ctrl = new AbortController();
+  const tId  = setTimeout(() => ctrl.abort(), 70000);
+
   try {
-    const h = await fetch(API_BASE + '/health', { headers: API_KEY ? {'X-API-Key': API_KEY} : {} });
-    if (!h.ok) throw new Error(h.status);
+    const h = await fetch(API_BASE + '/health', {
+      headers: API_KEY ? {'X-API-Key': API_KEY} : {},
+      signal: ctrl.signal
+    });
+    clearTimeout(tId); clearInterval(ticker);
+    if (!h.ok) {
+      const txt = await h.text().catch(()=>'');
+      throw new Error('HTTP ' + h.status + (txt ? ' — ' + txt.slice(0,120) : ''));
+    }
     const data = await h.json();
     dot.className = 'status-dot ok';
-    lbl.textContent = `Connecté · ${data.ai} · ${data.db}`;
+    lbl.textContent = 'Connecte · ' + data.ai + ' · ' + data.db + (secs>0?' ('+secs+'s)':'');
     const out = document.getElementById('health-output');
     if (out) out.textContent = JSON.stringify(data, null, 2);
-    // sys chips
     const chips = document.getElementById('sys-chips');
     if (chips) {
       chips.innerHTML = [
-        ['DB', data.db === 'postgresql' ? 'PostgreSQL Supabase ✓' : 'SQLite (config DATABASE_URL)', data.db === 'postgresql'],
+        ['DB', data.db === 'postgresql' ? 'PostgreSQL Supabase OK' : 'SQLite (ajoute DATABASE_URL)', data.db === 'postgresql'],
         ['IA', data.ai + ' · ' + (data.model||''), true],
-        ['Email', data.email !== 'none' ? 'Email ' + data.email + ' ✓' : 'Email non configuré', data.email !== 'none'],
-        ['Scraping', data.scraping === 'apify' ? 'Apify (offres réelles) ✓' : 'Mock (config APIFY_TOKEN)', data.scraping === 'apify'],
-        ['Sécurité', data.security === 'api_key' ? 'API Key ✓' : 'Non protégé !', data.security === 'api_key'],
+        ['Email', data.email !== 'none' ? 'Email ' + data.email + ' OK' : 'Email non configure', data.email !== 'none'],
+        ['Scraping', data.scraping === 'apify' ? 'Apify OK' : 'Mock (ajoute APIFY_TOKEN)', data.scraping === 'apify'],
+        ['Securite', data.security === 'api_key' ? 'API Key OK' : 'Non protege !', data.security === 'api_key'],
         ['Auto-apply', data.auto_apply ? 'ACTIF' : 'Manuel', null]
-      ].map(([k,v,ok]) => `<span class="sys-chip ${ok===true?'ok':ok===false?'warn':''}">${k}: ${v}</span>`).join('');
+      ].map(function(x){ var k=x[0],v=x[1],ok=x[2]; return '<span class="sys-chip '+(ok===true?'ok':ok===false?'warn':'')+'">'+k+': '+v+'</span>'; }).join('');
     }
-    toast('Connecté !', 'success');
+    toast('Connecte ! App reveilee en ' + secs + 's', 'success');
   } catch(e) {
+    clearTimeout(tId); clearInterval(ticker);
     dot.className = 'status-dot err';
-    lbl.textContent = 'Erreur de connexion';
-    toast('Impossible de joindre le backend. Vérifie l\'URL.', 'error');
+    if (e.name === 'AbortError') {
+      lbl.textContent = 'Timeout 70s — app ne repond pas';
+      toast('Timeout. Va sur render.com et verifie les Logs de ton service.', 'error');
+    } else {
+      lbl.textContent = 'Erreur : ' + e.message;
+      toast('Erreur connexion : ' + e.message, 'error');
+    }
+    const out = document.getElementById('health-output');
+    if (out) out.textContent = 'ERREUR: ' + e.message + '\n\nVerifications:\n1. URL correcte ? ' + API_BASE + '/health\n2. API Key correcte ?\n3. Logs Render : render.com → ton service → Logs';
   }
 }
 
@@ -824,6 +859,8 @@ async function analyzeOffer() {
   try {
     const r = await api('POST', '/api/offers/analyze', { text });
     const score = r.match_score || 0;
+    // Nettoyer le titre AVANT le template literal — évite SyntaxError dans onclick
+    const safeTitle = (r.title || '').replace(/['"\\`]/g, '');
     document.getElementById('offer-result').innerHTML = `
       <div class="card">
         <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
@@ -856,8 +893,8 @@ async function analyzeOffer() {
           <div style="font-size:.8rem;color:var(--ink2)">${r.negotiation_tip||'—'}</div>
         </div>
         <div class="btn-row">
-          <button class="btn btn-primary btn-sm" onclick="prefillAgent('${(r.title||'').replace(/'/g,'\\'')}','','')">🤖 Postuler via l'Agent</button>
-          <button class="btn btn-secondary btn-sm" onclick="prefillCV('${(r.title||'').replace(/'/g,'\\'')}')">📄 Adapter mon CV</button>
+          <button class="btn btn-primary btn-sm" onclick="prefillAgent('${safeTitle}','','')">🤖 Postuler via l'Agent</button>
+          <button class="btn btn-secondary btn-sm" onclick="prefillCV('${safeTitle}')">📄 Adapter mon CV</button>
         </div>
       </div>`;
     toast('Offre analysée ! Score: ' + score + '%', score>=85?'success':'');
@@ -1020,12 +1057,13 @@ async function genPost() {
       tone:   document.getElementById('post-tone').value,
       angle:  document.getElementById('post-angle').value
     });
+    const postClipId = clipStore(r.content);
     document.getElementById('post-result').innerHTML = `
       <div class="card">
         <h3>✅ Post généré</h3>
         <div class="output" style="white-space:pre-wrap">${r.content}</div>
         <div class="btn-row">
-          <button class="btn btn-primary btn-sm" onclick="copyText(\`${r.content.replace(/`/g,'\\`')}\`)">📋 Copier</button>
+          <button class="btn btn-primary btn-sm" onclick="clipCopy('${postClipId}')">📋 Copier</button>
         </div>
       </div>`;
     toast('Post LinkedIn généré !', 'success');
@@ -1039,15 +1077,18 @@ async function loadPosts() {
     const rows = await api('GET', '/api/linkedin/posts');
     const el = document.getElementById('posts-list');
     if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">💼</div><p>Aucun post</p></div>'; return; }
-    el.innerHTML = rows.map(r => `
+    el.innerHTML = rows.map(r => {
+      const id = clipStore(r.content);
+      return `
       <div class="card" style="margin-bottom:.75rem">
         <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
           <span class="badge badge-blue">${r.topic}</span>
           <span style="font-size:.68rem;color:var(--dim);font-family:var(--font-mono)">${fmtDate(r.created_at)}</span>
         </div>
         <div style="font-size:.8rem;color:var(--ink2);line-height:1.7;white-space:pre-wrap;max-height:120px;overflow:hidden">${r.content}</div>
-        <button class="btn btn-secondary btn-sm" style="margin-top:.5rem" onclick="copyText(\`${r.content.replace(/`/g,'\\`')}\`)">📋 Copier</button>
-      </div>`).join('');
+        <button class="btn btn-secondary btn-sm" style="margin-top:.5rem" onclick="clipCopy('${id}')">📋 Copier</button>
+      </div>`;
+    }).join('');
   } catch(e) {}
 }
 
@@ -1065,6 +1106,7 @@ async function composeEmail() {
       to_name: name, to_email: addr, company, role,
       context: document.getElementById('email-context').value
     });
+    const emailClipId = clipStore(r.body);
     document.getElementById('email-result').innerHTML = `
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem">
@@ -1078,7 +1120,7 @@ async function composeEmail() {
         ${r.hook?`<div style="margin-top:.5rem;font-size:.75rem;color:var(--blue)">🎯 Hook: ${r.hook}</div>`:''}
         <div class="btn-row">
           <button class="btn btn-primary btn-sm" onclick="sendEmail(${r.email_id})">📤 Envoyer</button>
-          <button class="btn btn-secondary btn-sm" onclick="copyText(\`${r.body.replace(/`/g,'\\`')}\`)">📋 Copier</button>
+          <button class="btn btn-secondary btn-sm" onclick="clipCopy('${emailClipId}')">📋 Copier</button>
         </div>
       </div>`;
     toast('Email composé ! Vérifie avant d\'envoyer.', 'success');
