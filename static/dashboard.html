@@ -597,8 +597,8 @@ Note: Plan gratuit = 5$/mois de crédits.
 <div id="toast"></div>
 
 <script>
-// ── CONFIG ────────────────────────────────────────────────────────
-// Stockage sécurisé — fonctionne avec ou sans localStorage
+// -- CONFIG --------------------------------------------------------
+// Stockage sécurisé - fonctionne avec ou sans localStorage
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch(e) { return store._mem[k] || ''; } },
   set(k,v){ try { localStorage.setItem(k, v); } catch(e) {} store._mem[k] = v; },
@@ -608,7 +608,7 @@ const store = {
 let API_BASE = store.get('api_base');
 let API_KEY  = store.get('api_key');
 
-// ── CLIPBOARD REGISTRY ────────────────────────────────────────────
+// -- CLIPBOARD REGISTRY --------------------------------------------
 // Stocke les textes longs ici pour éviter les problèmes d'échappement dans onclick
 const _clip = {};
 let _clipIdx = 0;
@@ -624,7 +624,7 @@ document.getElementById('cfg-key').value = API_KEY;
 document.getElementById('api-url-input').oninput = e => { API_BASE = e.target.value; store.set('api_base', API_BASE); document.getElementById('cfg-url').value = API_BASE; };
 document.getElementById('api-key-input').oninput  = e => { API_KEY = e.target.value;  store.set('api_key',  API_KEY);  document.getElementById('cfg-key').value  = API_KEY; };
 
-// ── API ───────────────────────────────────────────────────────────
+// -- API -----------------------------------------------------------
 async function api(method, path, body) {
   if (!API_BASE) { toast('Configure l\'URL du backend !', 'error'); throw new Error('no url'); }
   const headers = { 'Content-Type': 'application/json' };
@@ -634,7 +634,7 @@ async function api(method, path, body) {
   return res.json();
 }
 
-// ── NAV ───────────────────────────────────────────────────────────
+// -- NAV -----------------------------------------------------------
 const titles = { home:'Dashboard', copilot:'🌅 Copilot Quotidien', offers:'📋 Offres Freelance', agent:'🤖 Agent Candidature', nego:'💰 Négociateur TJM', linkedin:'💼 LinkedIn Studio', email:'📧 Email Prospection', cv:'📄 CV Adaptatif', proposal:'📑 Propositions', audit:'🔍 Audit Profil', config:'⚙️ Configuration' };
 
 function go(page) {
@@ -673,7 +673,7 @@ function showTab(page, tab) {
 
 function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
 
-// ── TOAST ─────────────────────────────────────────────────────────
+// -- TOAST ---------------------------------------------------------
 function toast(msg, type='') {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
@@ -682,13 +682,13 @@ function toast(msg, type='') {
   setTimeout(() => el.remove(), 3500);
 }
 
-// ── HEALTH ────────────────────────────────────────────────────────
+// -- HEALTH --------------------------------------------------------
 async function checkHealth() {
   const dot = document.getElementById('status-dot');
   const lbl = document.getElementById('status-label');
   if (!API_BASE) {
     dot.className = 'status-dot';
-    lbl.textContent = 'URL non configuree — colle ton URL Render ci-dessus';
+    lbl.textContent = 'URL non configuree - colle ton URL Render ci-dessus';
     const out = document.getElementById('health-output');
     if (out) out.textContent = 'Colle https://datalinkedai.onrender.com dans le champ URL puis clique Tester';
     return;
@@ -697,7 +697,7 @@ async function checkHealth() {
   dot.className = 'status-dot';
   lbl.textContent = '⏳ Connexion...';
 
-  // Compte a rebours — Render Free peut dormir jusqu'a 60s
+  // Compte a rebours - Render Free peut dormir jusqu'a 60s
   let secs = 0;
   const ticker = setInterval(() => {
     secs++;
@@ -718,18 +718,18 @@ async function checkHealth() {
     clearTimeout(tId); clearInterval(ticker);
     if (!h.ok) {
       const txt = await h.text().catch(()=>'');
-      throw new Error('HTTP ' + h.status + (txt ? ' — ' + txt.slice(0,120) : ''));
+      throw new Error('HTTP ' + h.status + (txt ? ' - ' + txt.slice(0,120) : ''));
     }
     const data = await h.json();
     dot.className = 'status-dot ok';
-    lbl.textContent = 'Connecte · ' + data.ai + ' · ' + data.db + (secs>0?' ('+secs+'s)':'');
+    lbl.textContent = 'Connecte . ' + data.ai + ' . ' + data.db + (secs>0?' ('+secs+'s)':'');
     const out = document.getElementById('health-output');
     if (out) out.textContent = JSON.stringify(data, null, 2);
     const chips = document.getElementById('sys-chips');
     if (chips) {
       chips.innerHTML = [
         ['DB', data.db === 'postgresql' ? 'PostgreSQL Supabase OK' : 'SQLite (ajoute DATABASE_URL)', data.db === 'postgresql'],
-        ['IA', data.ai + ' · ' + (data.model||''), true],
+        ['IA', data.ai + ' . ' + (data.model||''), true],
         ['Email', data.email !== 'none' ? 'Email ' + data.email + ' OK' : 'Email non configure', data.email !== 'none'],
         ['Scraping', data.scraping === 'apify' ? 'Apify OK' : 'Mock (ajoute APIFY_TOKEN)', data.scraping === 'apify'],
         ['Securite', data.security === 'api_key' ? 'API Key OK' : 'Non protege !', data.security === 'api_key'],
@@ -741,34 +741,34 @@ async function checkHealth() {
     clearTimeout(tId); clearInterval(ticker);
     dot.className = 'status-dot err';
     if (e.name === 'AbortError') {
-      lbl.textContent = 'Timeout 70s — app ne repond pas';
+      lbl.textContent = 'Timeout 70s - app ne repond pas';
       toast('Timeout. Va sur render.com et verifie les Logs de ton service.', 'error');
     } else {
       lbl.textContent = 'Erreur : ' + e.message;
       toast('Erreur connexion : ' + e.message, 'error');
     }
     const out = document.getElementById('health-output');
-    if (out) out.textContent = 'ERREUR: ' + e.message + '\n\nVerifications:\n1. URL correcte ? ' + API_BASE + '/health\n2. API Key correcte ?\n3. Logs Render : render.com → ton service → Logs';
+    if (out) out.textContent = 'ERREUR: ' + e.message + '\n\nVerifications:\n1. URL correcte ? ' + API_BASE + '/health\n2. API Key correcte ?\n3. Logs Render : render.com -> ton service -> Logs';
   }
 }
 
-// ── DASHBOARD ─────────────────────────────────────────────────────
+// -- DASHBOARD -----------------------------------------------------
 async function loadDashboard() {
   try {
     await checkHealth();
     const d = await api('GET', '/api/dashboard');
-    document.getElementById('s-offers').textContent = d.stats.offers ?? '—';
-    document.getElementById('s-cv').textContent = d.stats.cv ?? '—';
-    document.getElementById('s-apps').textContent = d.stats.applications ?? '—';
-    document.getElementById('s-emails').textContent = d.stats.emails_sent ?? '—';
-    document.getElementById('s-posts').textContent = d.stats.posts ?? '—';
+    document.getElementById('s-offers').textContent = d.stats.offers ?? '-';
+    document.getElementById('s-cv').textContent = d.stats.cv ?? '-';
+    document.getElementById('s-apps').textContent = d.stats.applications ?? '-';
+    document.getElementById('s-emails').textContent = d.stats.emails_sent ?? '-';
+    document.getElementById('s-posts').textContent = d.stats.posts ?? '-';
     document.getElementById('s-reply-rate').textContent = `Taux réponse : ${d.stats.reply_rate}`;
     const al = document.getElementById('activity-list');
     if (d.activities && d.activities.length) {
       al.innerHTML = d.activities.map(a => `
         <div class="activity-item">
           <div class="activity-ico">${a.icon || '📌'}</div>
-          <div><div class="activity-text">${a.text}</div><div class="activity-time">${fmtDate(a.ts)} · ${a.module}</div></div>
+          <div><div class="activity-text">${a.text}</div><div class="activity-time">${fmtDate(a.ts)} . ${a.module}</div></div>
         </div>`).join('');
     } else {
       al.innerHTML = '<div class="empty"><div class="emoji">🌱</div><p>Aucune activité. Lance le Copilot !</p></div>';
@@ -776,7 +776,7 @@ async function loadDashboard() {
   } catch(e) { console.warn('dashboard error', e); }
 }
 
-// ── COPILOT ───────────────────────────────────────────────────────
+// -- COPILOT -------------------------------------------------------
 async function runCopilot() {
   const btn = document.getElementById('btn-copilot-run');
   const out = document.getElementById('copilot-output');
@@ -794,7 +794,7 @@ async function runCopilot() {
         </div>
         ${r.top_offers ? r.top_offers.map(o => offerRow(o)).join('') : ''}
         <div style="margin-top:.75rem;font-size:.75rem;color:var(--dim);font-family:var(--font-mono)">
-          Post LinkedIn généré · Sujet: ${r.post_topic} · Mode: ${r.scraping}
+          Post LinkedIn généré . Sujet: ${r.post_topic} . Mode: ${r.scraping}
         </div>
       </div>`;
     toast('Copilot terminé ! ' + r.offers_analyzed + ' offres analysées.', 'success');
@@ -816,7 +816,7 @@ async function loadCopilotHistory() {
       rows.map(r => `<tr>
         <td style="font-family:var(--font-mono);font-size:.72rem">${fmtDate(r.run_at)}</td>
         <td>${r.offers_found}</td>
-        <td><span class="badge ${r.top_score>=85?'badge-green':r.top_score>=70?'badge-amber':'badge-dim'}">${r.top_score}%</span><br><span style="font-size:.7rem;color:var(--dim)">${r.top_offer||'—'}</span></td>
+        <td><span class="badge ${r.top_score>=85?'badge-green':r.top_score>=70?'badge-amber':'badge-dim'}">${r.top_score}%</span><br><span style="font-size:.7rem;color:var(--dim)">${r.top_offer||'-'}</span></td>
         <td>${r.digest_sent?'✅':'❌'}</td>
         <td>${r.auto_applied}</td>
       </tr>`).join('') + '</tbody></table>';
@@ -830,7 +830,7 @@ async function loadCopilotConfig() {
   } catch(e) {}
 }
 
-// ── OFFERS ────────────────────────────────────────────────────────
+// -- OFFERS --------------------------------------------------------
 function offerRow(o) {
   const score = o.match_score || o.score || 0;
   const cls = score >= 85 ? 'high' : score >= 65 ? 'medium' : 'low';
@@ -843,8 +843,8 @@ function offerRow(o) {
       <text x="26" y="30" text-anchor="middle" font-family="Bricolage Grotesque" font-size="10" font-weight="800" fill="${score>=85?'#00B96B':score>=65?'#F59E0B':'#7B8DB5'}">${score}%</text>
     </svg>
     <div style="flex:1">
-      <div class="offer-title">${o.title || o.offer_title || '—'}</div>
-      <div class="offer-meta">${o.company||''} ${o.source?'· '+o.source:''} ${o.tjm_negotiate?'· TJM: '+o.tjm_negotiate:''}</div>
+      <div class="offer-title">${o.title || o.offer_title || '-'}</div>
+      <div class="offer-meta">${o.company||''} ${o.source?'. '+o.source:''} ${o.tjm_negotiate?'. TJM: '+o.tjm_negotiate:''}</div>
       ${techs.length ? `<div class="chip-group">${techs.map(t=>`<span class="chip">${t}</span>`).join('')}</div>` : ''}
       ${o.urgency ? `<div style="margin-top:.3rem"><span class="badge ${o.urgency==='Postuler maintenant'?'badge-green':'badge-amber'}">${o.urgency}</span></div>` : ''}
     </div>
@@ -859,7 +859,7 @@ async function analyzeOffer() {
   try {
     const r = await api('POST', '/api/offers/analyze', { text });
     const score = r.match_score || 0;
-    // Nettoyer le titre AVANT le template literal — évite SyntaxError dans onclick
+    // Nettoyer le titre AVANT le template literal - évite SyntaxError dans onclick
     const safeTitle = (r.title || '').replace(/['"\\`]/g, '');
     document.getElementById('offer-result').innerHTML = `
       <div class="card">
@@ -871,26 +871,26 @@ async function analyzeOffer() {
             <text x="26" y="30" text-anchor="middle" font-family="Bricolage Grotesque" font-size="10" font-weight="800" fill="${score>=85?'#00B96B':score>=65?'#F59E0B':'#7B8DB5'}">${score}%</text>
           </svg>
           <div>
-            <h3 style="font-family:var(--font-head);font-size:1rem;margin-bottom:.25rem">${r.title||'—'}</h3>
-            <div><span class="badge ${r.urgency==='Postuler maintenant'?'badge-green':'badge-amber'}">${r.urgency||'—'}</span>
-            <span class="badge badge-blue" style="margin-left:.3rem">TJM : ${r.tjm_negotiate||'—'}</span>
+            <h3 style="font-family:var(--font-head);font-size:1rem;margin-bottom:.25rem">${r.title||'-'}</h3>
+            <div><span class="badge ${r.urgency==='Postuler maintenant'?'badge-green':'badge-amber'}">${r.urgency||'-'}</span>
+            <span class="badge badge-blue" style="margin-left:.3rem">TJM : ${r.tjm_negotiate||'-'}</span>
             ${r.remote?'<span class="badge badge-dim" style="margin-left:.3rem">Remote ✓</span>':''}</div>
           </div>
         </div>
         <div class="two-col">
           <div>
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">✅ ATOUTS</div>
-            ${(r.match_reasons||[]).map(x=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.2rem">• ${x}</div>`).join('')}
+            ${(r.match_reasons||[]).map(x=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.2rem">- ${x}</div>`).join('')}
           </div>
           <div>
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">⚠️ GAPS</div>
-            ${(r.gaps||[]).map(x=>`<div style="font-size:.8rem;color:var(--amber);margin-bottom:.2rem">• ${x}</div>`).join('')}
+            ${(r.gaps||[]).map(x=>`<div style="font-size:.8rem;color:var(--amber);margin-bottom:.2rem">- ${x}</div>`).join('')}
           </div>
         </div>
         ${(r.key_techs||[]).length ? `<div class="chip-group" style="margin-top:.75rem">${r.key_techs.map(t=>`<span class="chip">${t}</span>`).join('')}</div>` : ''}
         <div style="margin-top:.75rem;padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm)">
           <div style="font-size:.7rem;font-weight:600;color:var(--blue);margin-bottom:.2rem">💡 CONSEIL TJM</div>
-          <div style="font-size:.8rem;color:var(--ink2)">${r.negotiation_tip||'—'}</div>
+          <div style="font-size:.8rem;color:var(--ink2)">${r.negotiation_tip||'-'}</div>
         </div>
         <div class="btn-row">
           <button class="btn btn-primary btn-sm" onclick="prefillAgent('${safeTitle}','','')">🤖 Postuler via l'Agent</button>
@@ -922,7 +922,7 @@ async function loadOffers() {
   } catch(e) {}
 }
 
-// ── AGENT ─────────────────────────────────────────────────────────
+// -- AGENT ---------------------------------------------------------
 async function agentApply() {
   const title = document.getElementById('agent-title').value.trim();
   const desc  = document.getElementById('agent-desc').value.trim();
@@ -946,8 +946,8 @@ async function agentApply() {
           ${r.cv_pdf_generated?'<span class="badge badge-blue">PDF ✓</span>':''}
           ${r.email_sent?'<span class="badge badge-green">Email envoyé ✓</span>':''}
         </div>
-        <div style="font-weight:600;font-family:var(--font-head);margin-bottom:.5rem">${r.subject||'—'}</div>
-        <div class="output">${r.email_body||'—'}</div>
+        <div style="font-weight:600;font-family:var(--font-head);margin-bottom:.5rem">${r.subject||'-'}</div>
+        <div class="output">${r.email_body||'-'}</div>
         ${r.followup_at?`<div style="margin-top:.5rem;font-size:.75rem;color:var(--dim);font-family:var(--font-mono)">📅 Relance prévue : ${fmtDate(r.followup_at)}</div>`:''}
       </div>`;
     toast(r.email_sent ? 'Email envoyé !' : 'Candidature générée (draft)', r.email_sent ? 'success' : '');
@@ -962,15 +962,15 @@ async function loadApps() {
     if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">🤖</div><p>Aucune candidature</p></div>'; return; }
     el.innerHTML = '<table class="data-table"><thead><tr><th>#</th><th>Poste</th><th>Score</th><th>TJM</th><th>Statut</th><th>Relance</th><th>Actions</th></tr></thead><tbody>' +
       rows.map(r => {
-        const followupTxt = r.followup_sent ? '✓ Envoyée' : (r.followup_at ? fmtDate(r.followup_at) : '—');
+        const followupTxt = r.followup_sent ? '✓ Envoyée' : (r.followup_at ? fmtDate(r.followup_at) : '-');
         const actionBtn = r.reply_received ? '✅' : `<button class="btn btn-success btn-sm" onclick="markReplied(${r.id})">Répondu</button>`;
         const scoreCls = r.match_score >= 85 ? 'badge-green' : 'badge-amber';
         const statusCls = r.status === 'replied' ? 'badge-green' : r.status === 'sent' ? 'badge-blue' : 'badge-dim';
         return `<tr>
           <td style="font-family:var(--font-mono);font-size:.7rem">${r.id}</td>
-          <td>${r.offer_title || '—'}</td>
+          <td>${r.offer_title || '-'}</td>
           <td><span class="badge ${scoreCls}">${r.match_score || 0}%</span></td>
-          <td style="font-family:var(--font-mono)">${r.tjm_negotiate || '—'}</td>
+          <td style="font-family:var(--font-mono)">${r.tjm_negotiate || '-'}</td>
           <td><span class="badge ${statusCls}">${r.status}</span></td>
           <td style="font-size:.7rem;color:var(--dim)">${followupTxt}</td>
           <td>${actionBtn}</td>
@@ -990,7 +990,7 @@ async function loadAgentStats() {
   } catch(e) {}
 }
 
-// ── NEGO ──────────────────────────────────────────────────────────
+// -- NEGO ----------------------------------------------------------
 async function runNego() {
   const ctx = document.getElementById('nego-ctx').value.trim();
   const offer = document.getElementById('nego-offer').value.trim();
@@ -1007,7 +1007,7 @@ async function runNego() {
     document.getElementById('nego-result').innerHTML = `
       <div class="nego-card">
         <div class="label">CONTRE-OFFRE RECOMMANDÉE</div>
-        <div class="value">${r.counter_offer || '—'}</div>
+        <div class="value">${r.counter_offer || '-'}</div>
         <div style="margin-top:.5rem;font-size:.85rem;opacity:.85">${r.opening_line||''}</div>
         <div style="margin-top:.75rem;display:flex;gap:1.5rem">
           <div><div class="label">CONFIANCE</div><div style="font-size:1.4rem;font-weight:800">${r.confidence_score||'?'}%</div></div>
@@ -1016,9 +1016,9 @@ async function runNego() {
       </div>
       <div class="card">
         <h3>🎭 Script complet</h3>
-        <div class="nego-script">${r.full_script||'—'}</div>
+        <div class="nego-script">${r.full_script||'-'}</div>
         <div style="margin-top:.75rem">
-          ${(r.arguments||[]).map(a=>`<div style="display:flex;align-items:flex-start;gap:.4rem;margin-bottom:.35rem"><span style="color:var(--blue)">▸</span><span style="font-size:.82rem">${a}</span></div>`).join('')}
+          ${(r.arguments||[]).map(a=>`<div style="display:flex;align-items:flex-start;gap:.4rem;margin-bottom:.35rem"><span style="color:var(--blue)">></span><span style="font-size:.82rem">${a}</span></div>`).join('')}
         </div>
       </div>
       ${r.email_version ? `<div class="card"><h3>📧 Version email</h3><div class="output">${r.email_version}</div></div>` : ''}
@@ -1037,7 +1037,7 @@ async function loadNegoHistory() {
     el.innerHTML = rows.map(r => `
       <div style="padding:.65rem 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.2rem">
-          <span style="font-family:var(--font-mono);font-size:.75rem;color:var(--blue)">${r.current_offer} → ${r.counter_offer||'?'}</span>
+          <span style="font-family:var(--font-mono);font-size:.75rem;color:var(--blue)">${r.current_offer} -> ${r.counter_offer||'?'}</span>
           ${r.outcome ? `<span class="badge ${r.outcome==='accepté'?'badge-green':'badge-amber'}">${r.outcome}</span>` : ''}
         </div>
         <div style="font-size:.75rem;color:var(--dim)">${r.context.slice(0,70)}...</div>
@@ -1046,7 +1046,7 @@ async function loadNegoHistory() {
   } catch(e) {}
 }
 
-// ── LINKEDIN ──────────────────────────────────────────────────────
+// -- LINKEDIN ------------------------------------------------------
 async function genPost() {
   const btn = event.currentTarget;
   btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Génération...';
@@ -1092,7 +1092,7 @@ async function loadPosts() {
   } catch(e) {}
 }
 
-// ── EMAIL ─────────────────────────────────────────────────────────
+// -- EMAIL ---------------------------------------------------------
 async function composeEmail() {
   const name    = document.getElementById('email-name').value.trim();
   const addr    = document.getElementById('email-addr').value.trim();
@@ -1112,7 +1112,7 @@ async function composeEmail() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem">
           <div>
             <div style="font-weight:700;font-family:var(--font-head)">${r.subject}</div>
-            <div style="font-size:.75rem;color:var(--dim)">Pour : ${r.to} · ${r.best_send||''}</div>
+            <div style="font-size:.75rem;color:var(--dim)">Pour : ${r.to} . ${r.best_send||''}</div>
           </div>
           <span class="badge badge-amber">Draft</span>
         </div>
@@ -1145,7 +1145,7 @@ async function loadEmailHistory() {
     el.innerHTML = '<table class="data-table"><thead><tr><th>Contact</th><th>Entreprise</th><th>Objet</th><th>Statut</th><th>Date</th><th>Actions</th></tr></thead><tbody>' +
       rows.map(r => `<tr>
         <td>${r.to_name}<br><span style="font-family:var(--font-mono);font-size:.65rem;color:var(--dim)">${r.to_email}</span></td>
-        <td>${r.company||'—'}</td>
+        <td>${r.company||'-'}</td>
         <td style="max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${r.subject}</td>
         <td><span class="badge ${r.status==='replied'?'badge-green':r.status==='sent'?'badge-blue':'badge-dim'}">${r.status}</span></td>
         <td style="font-family:var(--font-mono);font-size:.68rem">${fmtDate(r.created_at)}</td>
@@ -1199,7 +1199,7 @@ async function loadEmailStats() {
   } catch(e) {}
 }
 
-// ── CV ────────────────────────────────────────────────────────────
+// -- CV ------------------------------------------------------------
 async function adaptCV() {
   const text = document.getElementById('cv-offer').value.trim();
   if (!text) { toast('Colle la description de l\'offre', 'error'); return; }
@@ -1211,18 +1211,18 @@ async function adaptCV() {
       <div class="card">
         <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem">
           <span class="badge ${r.score>=85?'badge-green':'badge-amber'}" style="font-size:.82rem;padding:.35rem .8rem">${r.score}% match</span>
-          <span class="badge badge-blue">${r.tjm_suggest||'—'}</span>
+          <span class="badge badge-blue">${r.tjm_suggest||'-'}</span>
           ${r.cv_pdf_generated?`<span class="badge badge-green">PDF ${r.pdf_size_kb}KB ✓</span>`:''}
         </div>
-        <h3 style="font-family:var(--font-head);font-size:1rem;margin-bottom:.75rem">${r.title_adapted||'—'}</h3>
+        <h3 style="font-family:var(--font-head);font-size:1rem;margin-bottom:.75rem">${r.title_adapted||'-'}</h3>
         <div style="padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm);margin-bottom:.75rem">
           <div style="font-size:.7rem;font-weight:600;color:var(--blue);margin-bottom:.2rem">ACCROCHE</div>
-          <div style="font-size:.82rem;color:var(--ink2);line-height:1.7">${r.accroche||'—'}</div>
+          <div style="font-size:.82rem;color:var(--ink2);line-height:1.7">${r.accroche||'-'}</div>
         </div>
         <div class="chip-group">${(r.competences||[]).map(c=>`<span class="chip">${c}</span>`).join('')}</div>
         <div style="margin-top:.75rem">
           <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">LETTRE DE MOTIVATION</div>
-          <div class="output">${r.cover_letter||'—'}</div>
+          <div class="output">${r.cover_letter||'-'}</div>
         </div>
         ${(r.strengths||[]).length ? `<div style="margin-top:.5rem">${r.strengths.map(s=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.2rem">✓ ${s}</div>`).join('')}</div>` : ''}
         <div style="margin-top:.5rem;padding:.65rem;background:var(--amber-soft);border-radius:var(--radius-sm)">
@@ -1244,13 +1244,13 @@ async function loadCVHistory() {
       rows.map(r => `<tr>
         <td>${r.title_adapted}</td>
         <td><span class="badge ${r.score>=85?'badge-green':'badge-amber'}">${r.score}%</span></td>
-        <td style="font-family:var(--font-mono)">${r.tjm_suggest||'—'}</td>
+        <td style="font-family:var(--font-mono)">${r.tjm_suggest||'-'}</td>
         <td style="font-family:var(--font-mono);font-size:.68rem">${fmtDate(r.created_at)}</td>
       </tr>`).join('') + '</tbody></table>';
   } catch(e) {}
 }
 
-// ── PROPOSAL ──────────────────────────────────────────────────────
+// -- PROPOSAL ------------------------------------------------------
 async function genProposal() {
   const brief = document.getElementById('proposal-brief').value.trim();
   if (!brief) { toast('Décris la mission', 'error'); return; }
@@ -1260,15 +1260,15 @@ async function genProposal() {
     const r = await api('POST', '/api/proposal/generate', { brief });
     document.getElementById('proposal-result').innerHTML = `
       <div class="card">
-        <h2 style="font-family:var(--font-head);font-size:1.3rem;margin-bottom:.75rem">${r.title||'—'}</h2>
+        <h2 style="font-family:var(--font-head);font-size:1.3rem;margin-bottom:.75rem">${r.title||'-'}</h2>
         <div style="padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm);margin-bottom:.75rem">
           <div style="font-size:.7rem;font-weight:600;color:var(--blue);margin-bottom:.25rem">RÉSUMÉ</div>
-          <div style="font-size:.82rem;line-height:1.7">${r.exec_summary||'—'}</div>
+          <div style="font-size:.82rem;line-height:1.7">${r.exec_summary||'-'}</div>
         </div>
         <div class="two-col">
           <div>
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">LIVRABLES</div>
-            ${(r.deliverables||[]).map(d=>`<div style="font-size:.8rem;margin-bottom:.25rem">• ${d}</div>`).join('')}
+            ${(r.deliverables||[]).map(d=>`<div style="font-size:.8rem;margin-bottom:.25rem">- ${d}</div>`).join('')}
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin:.75rem 0 .4rem">POURQUOI MOI</div>
             ${(r.why_me||[]).map(w=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.25rem">✓ ${w}</div>`).join('')}
           </div>
@@ -1276,14 +1276,14 @@ async function genProposal() {
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">MÉTHODOLOGIE</div>
             ${(r.methodology||[]).map((m,i)=>`<div style="font-size:.8rem;margin-bottom:.25rem"><span class="badge badge-blue" style="margin-right:.3rem">${i+1}</span>${m}</div>`).join('')}
             <div style="margin-top:.75rem;padding:.75rem;background:var(--green-soft);border-radius:var(--radius-sm)">
-              <div style="font-size:.7rem;color:var(--green);font-weight:600">TARIF · DÉLAI</div>
-              <div style="font-size:.9rem;font-weight:700;font-family:var(--font-head)">${r.pricing||'—'} · ${r.timeline||'—'}</div>
+              <div style="font-size:.7rem;color:var(--green);font-weight:600">TARIF . DÉLAI</div>
+              <div style="font-size:.9rem;font-weight:700;font-family:var(--font-head)">${r.pricing||'-'} . ${r.timeline||'-'}</div>
             </div>
           </div>
         </div>
         <div style="margin-top:.75rem;padding:.75rem;background:var(--orange-soft);border-radius:var(--radius-sm)">
           <div style="font-size:.75rem;color:var(--orange)">🚀 PROCHAINE ÉTAPE</div>
-          <div style="font-size:.82rem">${r.next_steps||'—'}</div>
+          <div style="font-size:.82rem">${r.next_steps||'-'}</div>
         </div>
       </div>`;
     toast('Proposition générée !', 'success');
@@ -1291,7 +1291,7 @@ async function genProposal() {
   btn.disabled = false; btn.innerHTML = '📑 Générer la proposition complète';
 }
 
-// ── AUDIT ─────────────────────────────────────────────────────────
+// -- AUDIT ---------------------------------------------------------
 async function runAudit() {
   const btn = event.currentTarget;
   btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Audit en cours...';
@@ -1306,7 +1306,7 @@ async function runAudit() {
           </div>
           <div style="flex:1">
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">TITRE OPTIMISÉ SUGGÉRÉ</div>
-            <div style="font-family:var(--font-head);font-size:1rem">${r.headline||'—'}</div>
+            <div style="font-family:var(--font-head);font-size:1rem">${r.headline||'-'}</div>
             <div class="progress-bar" style="margin-top:.5rem"><div class="progress-fill" style="width:${r.seo||0}%;background:linear-gradient(90deg,var(--blue),var(--green))"></div></div>
             <div style="font-size:.68rem;color:var(--dim);font-family:var(--font-mono)">SEO Score: ${r.seo||0}/100</div>
           </div>
@@ -1328,7 +1328,7 @@ async function runAudit() {
           </div>
           <div>
             <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">⚡ QUICK WINS</div>
-            ${(r.quick_wins||[]).map(w=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.25rem">• ${w}</div>`).join('')}
+            ${(r.quick_wins||[]).map(w=>`<div style="font-size:.8rem;color:var(--green);margin-bottom:.25rem">- ${w}</div>`).join('')}
           </div>
         </div>
       </div>`;
@@ -1337,7 +1337,7 @@ async function runAudit() {
   btn.disabled = false; btn.innerHTML = '🚀 Lancer l\'audit';
 }
 
-// ── CONFIG ────────────────────────────────────────────────────────
+// -- CONFIG --------------------------------------------------------
 function saveConfig() {
   API_BASE = document.getElementById('cfg-url').value.trim().replace(/\/$/,'');
   API_KEY  = document.getElementById('cfg-key').value.trim();
@@ -1349,9 +1349,9 @@ function saveConfig() {
   checkHealth();
 }
 
-// ── UTILS ─────────────────────────────────────────────────────────
+// -- UTILS ---------------------------------------------------------
 function fmtDate(s) {
-  if (!s || s === 'None') return '—';
+  if (!s || s === 'None') return '-';
   try { return new Date(s).toLocaleString('fr-FR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}); }
   catch { return s; }
 }
@@ -1360,7 +1360,7 @@ function copyText(text) {
   navigator.clipboard.writeText(text).then(() => toast('Copié !', 'success'));
 }
 
-// ── INIT ──────────────────────────────────────────────────────────
+// -- INIT ----------------------------------------------------------
 window.onload = () => {
   if (API_BASE) { loadDashboard(); }
   // Responsive
