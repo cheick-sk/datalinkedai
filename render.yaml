@@ -1,0 +1,15 @@
+# Render — render.yaml
+# Auto-détecté par Render sur push GitHub
+
+services:
+  - type: web
+    name: datalinkedai-poc
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false       # à saisir manuellement dans Render dashboard
+      - key: PORT
+        value: 8080
+    healthCheckPath: /health
+    autoDeploy: true
