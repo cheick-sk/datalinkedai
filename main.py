@@ -90,7 +90,7 @@ DB_PATH      = "/tmp/datalinkedai.db"
 USE_POSTGRES = bool(DATABASE_URL)
 
 API_KEY        = os.getenv("API_KEY", "")
-SKIP_AUTH      = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/dashboard"}
+SKIP_AUTH      = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/dashboard", "/favicon.ico"}
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 RESEND_API_KEY  = os.getenv("RESEND_API_KEY", "")
@@ -812,283 +812,250 @@ def make_html_email(body_text: str) -> str:
 # ══════════════════════════════════════════════════════
 
 def _generate_cv_pdf_sync(cv_data: dict, offer_title: str = "") -> bytes:
-    """CV PDF moderne 2 colonnes — sidebar gauche colorée + contenu principal."""
+    """CV PDF professionnel — layout 2 colonnes stable (sidebar + contenu)."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles    import ParagraphStyle
-        from reportlab.lib.units     import cm, mm
+        from reportlab.lib.units     import cm
         from reportlab.lib           import colors
         from reportlab.platypus      import (SimpleDocTemplate, Paragraph, Spacer,
-                                             HRFlowable, Table, TableStyle, KeepTogether)
-        from reportlab.lib.enums     import TA_LEFT, TA_CENTER, TA_JUSTIFY
-        from reportlab.pdfgen        import canvas as pdfcanvas
-        from reportlab.platypus      import BaseDocTemplate, PageTemplate, Frame
+                                             HRFlowable, Table, TableStyle,
+                                             KeepInFrame)
+        from reportlab.lib.enums     import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
     except ImportError:
         logger.warning("reportlab non installe — PDF desactive")
         return b""
 
-    # ── Palette ────────────────────────────────────────────────────────
-    C_BLUE    = colors.HexColor("#1A3A6B")   # sidebar fond
-    C_ACCENT  = colors.HexColor("#2563EB")   # titres sections droite, liens
-    C_LIGHT   = colors.HexColor("#EFF4FF")   # fond kpis
-    C_DARK    = colors.HexColor("#0F172A")   # texte principal
-    C_MUTED   = colors.HexColor("#64748B")   # texte secondaire
-    C_WHITE   = colors.white
-    C_SIDEBAR = colors.HexColor("#F0F4FF")   # compétences tag fond
-    C_GOLD    = colors.HexColor("#F59E0B")   # accent TJM
-    C_DIVIDER = colors.HexColor("#CBD5E1")
+    # ── Couleurs ────────────────────────────────────────────────────────
+    C_BLUE   = colors.HexColor("#1A3A6B")
+    C_ACCENT = colors.HexColor("#2563EB")
+    C_GOLD   = colors.HexColor("#F59E0B")
+    C_DARK   = colors.HexColor("#0F172A")
+    C_MUTED  = colors.HexColor("#64748B")
+    C_WHITE  = colors.white
+    C_DIV    = colors.HexColor("#CBD5E1")
+    C_LIGHT_BLUE = colors.HexColor("#BFDBFE")
+    C_SKY    = colors.HexColor("#93C5FD")
 
-    W, H = A4  # 595.27 x 841.89 pts
+    W, H = A4   # 595 x 842 pts
+    SIDEBAR_W = 175
+    MARGIN    = 14
+    HDR_H     = 95
 
-    # ── Données ────────────────────────────────────────────────────────
-    title_adapted  = cv_data.get("title_adapted", PROFILE["title"])
-    accroche       = cv_data.get("accroche", "")
-    kpis           = cv_data.get("kpis", ["8 ans d'xp Data", "3 clouds maitrisés", "TJM 760€/j"])
-    comp_core      = cv_data.get("competences_core", cv_data.get("competences", PROFILE["skills"]))[:8]
-    comp_sec       = cv_data.get("competences_secondaires", PROFILE["skills"])[:8]
-    experiences    = cv_data.get("experiences", [])
-    formations     = cv_data.get("formations", [{"diplome": "Master Informatique / Data Engineering", "ecole": "", "annee": ""}])
-    certifications = cv_data.get("certifications", ["AWS Certified", "GCP Pro Data Engineer", "Snowflake SnowPro"])
-    langues        = cv_data.get("langues", [{"langue": "Français", "niveau": "Natif"}, {"langue": "Anglais", "niveau": "Courant"}])
-    soft_skills    = cv_data.get("soft_skills", ["Leadership technique", "Communication", "Autonomie", "Agilité"])
-    tjm            = cv_data.get("tjm_suggest", "760€/j")
+    # ── Données (dynamiques depuis PROFILE) ─────────────────────────────
+    p_name   = PROFILE.get("name", "Candidat")
+    p_title  = PROFILE.get("title", "Consultant Freelance")
+    p_email  = PROFILE.get("email", "")
+    p_phone  = PROFILE.get("phone", "")
+    p_city   = PROFILE.get("location", "")
+    p_github = PROFILE.get("github", "")
+    p_linkedin = PROFILE.get("linkedin", "")
 
-    if not experiences:
-        experiences = [{"company": e["company"], "period": e["period"], "role": e["role"],
-                        "context": e.get("pitch", ""),
-                        "missions": [e.get("stack", ""), e.get("pitch", "")],
-                        "stack": e.get("stack", "")} for e in PROFILE["experiences"]]
+    title_adapted  = cv_data.get("title_adapted", p_title)
+    accroche       = cv_data.get("accroche", PROFILE.get("bio",""))
+    kpis           = cv_data.get("kpis", ["Expérience confirmée", "Disponible rapidement", "Résultats mesurables"])
+    comp_core      = cv_data.get("competences_core", cv_data.get("competences", PROFILE.get("skills",[])))[:8]
+    comp_sec       = cv_data.get("competences_secondaires", PROFILE.get("skills",[]))[:8]
+    experiences    = cv_data.get("experiences", PROFILE.get("experiences", []))
+    formations     = cv_data.get("formations", PROFILE.get("formations", []))
+    certifications = cv_data.get("certifications", PROFILE.get("certifications", []))
+    langues        = cv_data.get("langues", PROFILE.get("languages", [{"langue":"Français","niveau":"Natif"}]))
+    soft_skills    = cv_data.get("soft_skills", ["Autonomie","Communication","Rigueur","Adaptabilité"])
+    tjm            = cv_data.get("tjm_suggest", f"{PROFILE.get('tjm_min',500)}-{PROFILE.get('tjm_max',700)}€/j")
 
-    # ── Canvas callback : dessine le fond sidebar ────────────────────
-    SIDEBAR_W = 175   # largeur sidebar en pts
+    # Normalise les expériences
+    exps = []
+    for e in (experiences or [])[:5]:
+        exps.append({
+            "company": e.get("company",""),
+            "role":    e.get("role", e.get("title","")),
+            "period":  e.get("period", e.get("date","")),
+            "context": e.get("context", e.get("pitch","")),
+            "missions": e.get("missions", [e.get("pitch","")]) if isinstance(e.get("missions"), list) else [e.get("missions","")],
+            "stack":   e.get("stack",""),
+        })
 
-    def draw_background(canv, doc):
-        canv.saveState()
-        # Fond sidebar gauche
-        canv.setFillColor(C_BLUE)
-        canv.rect(0, 0, SIDEBAR_W, H, fill=1, stroke=0)
-        # Bande top header
-        canv.setFillColor(C_ACCENT)
-        canv.rect(0, H - 100, W, 100, fill=1, stroke=0)
-        # Ligne de séparation verticale subtile
-        canv.setStrokeColor(colors.HexColor("#1E40AF"))
-        canv.setLineWidth(0.5)
-        canv.line(SIDEBAR_W, 0, SIDEBAR_W, H - 100)
-        canv.restoreState()
-
-    # ── Styles ─────────────────────────────────────────────────────────
+    # ── Style helpers ────────────────────────────────────────────────────
     def PS(name, **kw):
         return ParagraphStyle(name, **kw)
 
-    # Header (fond bleu foncé)
-    sName    = PS("name",    fontSize=24, fontName="Helvetica-Bold", textColor=C_WHITE, leading=28, spaceAfter=2)
-    sTitle   = PS("title",   fontSize=11, fontName="Helvetica",      textColor=colors.HexColor("#93C5FD"), leading=16, spaceAfter=0)
-    sTjm     = PS("tjm",     fontSize=10, fontName="Helvetica-Bold", textColor=C_GOLD,  leading=14)
+    sName   = PS("name",  fontSize=22, fontName="Helvetica-Bold", textColor=C_WHITE,  leading=26)
+    sTitle  = PS("title", fontSize=10, fontName="Helvetica",      textColor=C_SKY,   leading=14)
+    sTjm    = PS("tjm",   fontSize=10, fontName="Helvetica-Bold", textColor=C_GOLD,  leading=13)
+    sInfo   = PS("info",  fontSize=8,  fontName="Helvetica",      textColor=C_LIGHT_BLUE, leading=11)
+    sGit    = PS("git",   fontSize=7,  fontName="Helvetica",      textColor=C_SKY,   leading=10)
 
-    # Sidebar (fond bleu sombre)
-    sSidH    = PS("sidH",    fontSize=8,  fontName="Helvetica-Bold", textColor=colors.HexColor("#93C5FD"),
-                  spaceBefore=14, spaceAfter=5, leading=12, letterSpacing=1.5)
-    sSidTxt  = PS("sidTxt",  fontSize=8,  fontName="Helvetica",      textColor=C_WHITE, leading=12, spaceAfter=3)
-    sSidMut  = PS("sidMut",  fontSize=7,  fontName="Helvetica",      textColor=colors.HexColor("#94A3B8"), leading=11, spaceAfter=2)
-    sSidTag  = PS("sidTag",  fontSize=7.5,fontName="Helvetica-Bold", textColor=C_WHITE, leading=11, spaceAfter=3)
+    sSidH   = PS("sidH",  fontSize=7.5,fontName="Helvetica-Bold", textColor=C_SKY,   spaceBefore=12,spaceAfter=4,leading=11)
+    sSidTxt = PS("sidTxt",fontSize=8,  fontName="Helvetica",      textColor=C_WHITE, leading=12,spaceAfter=2)
+    sSidMut = PS("sidMut",fontSize=7,  fontName="Helvetica",      textColor=colors.HexColor("#94A3B8"),leading=10,spaceAfter=2)
 
-    # Contenu principal (fond blanc)
-    sSecH    = PS("secH",    fontSize=9,  fontName="Helvetica-Bold", textColor=C_ACCENT,
-                  spaceBefore=14, spaceAfter=4, leading=12, letterSpacing=1.5)
-    sAccr    = PS("accr",    fontSize=9,  fontName="Helvetica",      textColor=C_DARK,  leading=14, spaceAfter=6,
-                  alignment=TA_JUSTIFY)
-    sExpCo   = PS("expCo",   fontSize=10, fontName="Helvetica-Bold", textColor=C_DARK,  leading=13, spaceAfter=1)
-    sExpRole = PS("expRole", fontSize=8.5,fontName="Helvetica",      textColor=C_ACCENT,leading=12, spaceAfter=1)
-    sExpDt   = PS("expDt",   fontSize=7.5,fontName="Helvetica",      textColor=C_MUTED, leading=11, spaceAfter=2)
-    sExpCtx  = PS("expCtx",  fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=12, spaceAfter=3,
-                  alignment=TA_JUSTIFY)
-    sMission = PS("miss",    fontSize=8,  fontName="Helvetica",      textColor=C_DARK,  leading=13, leftIndent=10,
-                  spaceAfter=2)
-    sStack   = PS("stack",   fontSize=7.5,fontName="Helvetica-Bold", textColor=C_ACCENT,leading=11, spaceAfter=4)
-    sFormD   = PS("formD",   fontSize=9,  fontName="Helvetica-Bold", textColor=C_DARK,  leading=13, spaceAfter=1)
-    sFormS   = PS("formS",   fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=11, spaceAfter=4)
+    sSecH   = PS("secH",  fontSize=8.5,fontName="Helvetica-Bold", textColor=C_ACCENT,spaceBefore=12,spaceAfter=3,leading=11)
+    sAccr   = PS("accr",  fontSize=8.5,fontName="Helvetica",      textColor=C_DARK,  leading=13,spaceAfter=4,alignment=TA_JUSTIFY)
+    sExpCo  = PS("expCo", fontSize=10, fontName="Helvetica-Bold", textColor=C_DARK,  leading=13,spaceAfter=1)
+    sExpRo  = PS("expRo", fontSize=8.5,fontName="Helvetica",      textColor=C_ACCENT,leading=11,spaceAfter=1)
+    sExpDt  = PS("expDt", fontSize=7.5,fontName="Helvetica",      textColor=C_MUTED, leading=10,spaceAfter=2)
+    sExpCtx = PS("expCtx",fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=11,spaceAfter=2,alignment=TA_JUSTIFY)
+    sMiss   = PS("miss",  fontSize=8,  fontName="Helvetica",      textColor=C_DARK,  leading=12,leftIndent=8,spaceAfter=1)
+    sStack  = PS("stack", fontSize=7.5,fontName="Helvetica-Bold", textColor=C_ACCENT,leading=10,spaceAfter=5)
+    sFormD  = PS("formD", fontSize=9,  fontName="Helvetica-Bold", textColor=C_DARK,  leading=12,spaceAfter=1)
+    sFormS  = PS("formS", fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=11,spaceAfter=3)
 
-    HR_main  = lambda: HRFlowable(width="100%", thickness=0.5, color=C_DIVIDER, spaceAfter=6, spaceBefore=0)
-    HR_sid   = lambda: HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#2D4A7A"), spaceAfter=6, spaceBefore=0)
+    def HR_main(): return HRFlowable(width="100%", thickness=0.5, color=C_DIV, spaceAfter=5, spaceBefore=0)
+    def HR_sid():  return HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#2D4A7A"), spaceAfter=4, spaceBefore=0)
 
-    # ── Frames layout ──────────────────────────────────────────────────
-    MARGIN   = 12
-    HDR_H    = 100   # hauteur header
-    SIDE_X   = MARGIN
-    SIDE_Y   = MARGIN
-    SIDE_W   = SIDEBAR_W - 2 * MARGIN
-    SIDE_H   = H - HDR_H - 2 * MARGIN
+    def safe(txt):
+        """Échappe les caractères XML pour ReportLab."""
+        return str(txt).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-    MAIN_X   = SIDEBAR_W + MARGIN
-    MAIN_Y   = MARGIN
-    MAIN_W   = W - SIDEBAR_W - 2 * MARGIN
-    MAIN_H   = H - HDR_H - 2 * MARGIN
+    # ── Contenu HEADER ───────────────────────────────────────────────────
+    contact_parts = [p for p in [p_email, p_phone, p_city] if p]
+    contact_str   = "  |  ".join(contact_parts) if contact_parts else ""
+    link_parts    = [p for p in [p_github, p_linkedin] if p]
+    link_str      = "  |  ".join(link_parts) if link_parts else ""
 
-    HDR_X    = MARGIN
-    HDR_Y    = H - HDR_H + MARGIN
-    HDR_W    = W - 2 * MARGIN
-    HDR_HH   = HDR_H - 2 * MARGIN
-
-    frame_header  = Frame(HDR_X,  HDR_Y,  HDR_W,  HDR_HH, id="header",  leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
-    frame_sidebar = Frame(SIDE_X, SIDE_Y, SIDE_W, SIDE_H, id="sidebar", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
-    frame_main    = Frame(MAIN_X, MAIN_Y, MAIN_W, MAIN_H, id="main",    leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
-
-    buf = io.BytesIO()
-
-    class MultiFrameDoc(BaseDocTemplate):
-        def build(self, flowables):
-            self._calc()
-            self.canv = pdfcanvas.Canvas(self.filename, pagesize=A4)
-            self.handle_documentBegin()
-            self.handle_pageBegin()
-            # Distribuer les flowables dans les frames manuellement
-            for f in flowables:
-                self.handle_flowable(f)
-            self.handle_documentEnd()
-
-    # Approche plus simple : 3 colonnes via Table
-    # Header row (pleine largeur) + 2 colonnes (sidebar | main)
-
-    # ── CONTENU HEADER ─────────────────────────────────────────────────
-    contact_line = "kaba.sekouna@gmail.com  |  +33 06 59 02 21 57  |  Montreuil, Ile-de-France"
-    github_line  = "github.com/cheick-sk/datalinkedai  |  LinkedIn: /in/sekouna-kaba"
-
-    hdr_left = [
-        Paragraph("KABA Sekouna", sName),
-        Paragraph(title_adapted, sTitle),
+    hdr_left_items = [
+        Paragraph(safe(p_name), sName),
+        Paragraph(safe(title_adapted), sTitle),
     ]
-    hdr_right = [
-        Paragraph(f"TJM : {tjm}", sTjm),
-        Spacer(1, 4),
-        Paragraph(contact_line, PS("ci", fontSize=8, fontName="Helvetica", textColor=colors.HexColor("#BFDBFE"), leading=12)),
-        Paragraph(github_line,  PS("gi", fontSize=7.5, fontName="Helvetica", textColor=colors.HexColor("#93C5FD"), leading=11)),
+    hdr_right_items = [
+        Paragraph(safe(f"TJM : {tjm}"), sTjm),
     ]
+    if contact_str:
+        hdr_right_items.append(Spacer(1, 3))
+        hdr_right_items.append(Paragraph(safe(contact_str), sInfo))
+    if link_str:
+        hdr_right_items.append(Paragraph(safe(link_str), sGit))
 
-    # ── CONTENU SIDEBAR ────────────────────────────────────────────────
-    def sid_section(title):
+    HDR_W  = W - 2 * MARGIN
+    HDR_HH = HDR_H - 2 * MARGIN
+    hdr_l_frame = KeepInFrame(HDR_W * 0.62, HDR_HH, hdr_left_items,  mode="shrink")
+    hdr_r_frame = KeepInFrame(HDR_W * 0.35, HDR_HH, hdr_right_items, mode="shrink")
+    hdr_table   = Table([[hdr_l_frame, hdr_r_frame]],
+                        colWidths=[HDR_W * 0.62, HDR_W * 0.38])
+    hdr_table.setStyle(TableStyle([
+        ("VALIGN",       (0,0),(-1,-1),"MIDDLE"),
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("RIGHTPADDING", (0,0),(-1,-1), 0),
+        ("TOPPADDING",   (0,0),(-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+        ("ALIGN",        (1,0),(1,0),  "RIGHT"),
+    ]))
+
+    # ── Contenu SIDEBAR ──────────────────────────────────────────────────
+    def sid_sec(title):
         return [Paragraph(title.upper(), sSidH), HR_sid()]
 
-    sidebar_content = []
+    sid = []
+    sid += sid_sec("Chiffres clés")
+    for k in kpis[:3]:
+        sid.append(Paragraph(f"• {safe(k)}", sSidTxt))
 
-    # KPIs
-    sidebar_content += sid_section("Chiffres clés")
-    for kpi in kpis[:3]:
-        sidebar_content.append(Paragraph(f"• {kpi}", sSidTag))
-
-    # Compétences core
-    sidebar_content += sid_section("Compétences clés")
+    sid += sid_sec("Compétences")
     for c in comp_core:
-        sidebar_content.append(Paragraph(f"▸ {c}", sSidTxt))
+        sid.append(Paragraph(f"▸ {safe(c)}", sSidTxt))
 
-    # Compétences secondaires
-    sidebar_content += sid_section("Autres technologies")
-    sidebar_content.append(Paragraph("  ·  ".join(comp_sec), sSidMut))
+    if comp_sec:
+        sid += sid_sec("Autres")
+        sid.append(Paragraph("  ·  ".join(safe(c) for c in comp_sec), sSidMut))
 
-    # Soft skills
-    sidebar_content += sid_section("Soft Skills")
-    for s in soft_skills:
-        sidebar_content.append(Paragraph(f"◦ {s}", sSidMut))
+    if soft_skills:
+        sid += sid_sec("Soft skills")
+        for s in soft_skills:
+            sid.append(Paragraph(f"◦ {safe(s)}", sSidMut))
 
-    # Langues
-    sidebar_content += sid_section("Langues")
-    for lang in langues:
-        sidebar_content.append(
-            Paragraph(f"{lang.get('langue','?')}  —  {lang.get('niveau','?')}", sSidTxt)
-        )
+    if langues:
+        sid += sid_sec("Langues")
+        for lang in (langues if isinstance(langues, list) else []):
+            if isinstance(lang, dict):
+                sid.append(Paragraph(f"{safe(lang.get('langue',''))} — {safe(lang.get('niveau',''))}", sSidTxt))
+            else:
+                sid.append(Paragraph(safe(str(lang)), sSidTxt))
 
-    # Certifications
-    sidebar_content += sid_section("Certifications")
-    for cert in certifications[:4]:
-        sidebar_content.append(Paragraph(f"✓ {cert}", sSidMut))
+    if certifications:
+        sid += sid_sec("Certifications")
+        for cert in (certifications if isinstance(certifications, list) else [])[:4]:
+            sid.append(Paragraph(f"✓ {safe(cert)}", sSidMut))
 
-    # ── CONTENU PRINCIPAL ──────────────────────────────────────────────
-    def main_section(title):
+    # ── Contenu PRINCIPAL ────────────────────────────────────────────────
+    def main_sec(title):
         return [Paragraph(title.upper(), sSecH), HR_main()]
 
-    main_content = []
+    main = []
 
-    # Profil
     if accroche:
-        main_content += main_section("Profil")
-        main_content.append(Paragraph(accroche, sAccr))
+        main += main_sec("Profil")
+        main.append(Paragraph(safe(accroche), sAccr))
 
-    # Expériences
-    main_content += main_section("Expériences Professionnelles")
-    for exp in experiences[:5]:
-        block = []
-        block.append(Paragraph(exp.get("company", ""), sExpCo))
-        block.append(Paragraph(exp.get("role", ""), sExpRole))
-        block.append(Paragraph(exp.get("period", ""), sExpDt))
-        ctx = exp.get("context", "")
-        if ctx:
-            block.append(Paragraph(ctx, sExpCtx))
-        missions = exp.get("missions", [])
-        if isinstance(missions, str):
-            missions = [missions]
-        for m in missions[:5]:
-            if m and m.strip():
-                block.append(Paragraph(f"→  {m}", sMission))
-        stack = exp.get("stack", "")
-        if stack:
-            block.append(Paragraph(f"Stack : {stack}", sStack))
-        block.append(Spacer(1, 5))
-        main_content.append(KeepTogether(block))
+    main += main_sec("Expériences Professionnelles")
+    for exp in exps:
+        main.append(Paragraph(safe(exp["company"]), sExpCo))
+        if exp["role"]:
+            main.append(Paragraph(safe(exp["role"]), sExpRo))
+        if exp["period"]:
+            main.append(Paragraph(safe(exp["period"]), sExpDt))
+        if exp["context"]:
+            main.append(Paragraph(safe(exp["context"]), sExpCtx))
+        for m in (exp["missions"] or [])[:4]:
+            if m and str(m).strip():
+                main.append(Paragraph(f"→  {safe(str(m))}", sMiss))
+        if exp["stack"]:
+            main.append(Paragraph(f"Stack : {safe(exp['stack'])}", sStack))
+        main.append(Spacer(1, 4))
 
-    # Formation
-    main_content += main_section("Formation")
-    for f in (formations if isinstance(formations, list) else []):
-        diplome = f.get("diplome", "")
-        ecole   = f.get("ecole", "")
-        annee   = f.get("annee", "")
-        main_content.append(Paragraph(diplome, sFormD))
-        if ecole or annee:
-            main_content.append(Paragraph(f"{ecole}  {annee}".strip(), sFormS))
+    if formations:
+        main += main_sec("Formation")
+        for f in (formations if isinstance(formations, list) else []):
+            d = f.get("diplome","") if isinstance(f, dict) else str(f)
+            main.append(Paragraph(safe(d), sFormD))
+            if isinstance(f, dict):
+                ec = f.get("ecole",""); an = f.get("annee","")
+                if ec or an:
+                    main.append(Paragraph(safe(f"{ec}  {an}".strip()), sFormS))
 
-    # ── ASSEMBLY via Table 2 colonnes ──────────────────────────────────
-    # Convertir les listes en un seul "stack" par cellule
+    # ── Canvas callback (dessin fond) ────────────────────────────────────
+    def draw_bg(canv, doc):
+        canv.saveState()
+        canv.setFillColor(C_BLUE)
+        canv.rect(0, 0, SIDEBAR_W, H, fill=1, stroke=0)
+        canv.setFillColor(C_ACCENT)
+        canv.rect(0, H - HDR_H, W, HDR_H, fill=1, stroke=0)
+        canv.setStrokeColor(colors.HexColor("#1E40AF"))
+        canv.setLineWidth(0.5)
+        canv.line(SIDEBAR_W, 0, SIDEBAR_W, H - HDR_H)
+        canv.restoreState()
 
-    from reportlab.platypus import KeepInFrame
+    # ── Assembly — KeepInFrame dans Table (sans KeepTogether imbriqué) ───
+    SIDE_W = SIDEBAR_W - 2 * MARGIN
+    SIDE_H = H - HDR_H - 2 * MARGIN
+    MAIN_W = W - SIDEBAR_W - 2 * MARGIN
+    MAIN_H = H - HDR_H - 2 * MARGIN
 
-    sid_frame  = KeepInFrame(SIDE_W,  SIDE_H,  sidebar_content, mode="shrink")
-    main_frame = KeepInFrame(MAIN_W,  MAIN_H,  main_content,    mode="shrink")
+    # NOTE: KeepInFrame accepte une liste plate de Flowables — pas de KeepTogether ici
+    sid_frame  = KeepInFrame(SIDE_W, SIDE_H, sid,  mode="shrink")
+    main_frame = KeepInFrame(MAIN_W, MAIN_H, main, mode="shrink")
 
-    # Table 1 ligne x 2 cols
-    col_widths = [SIDEBAR_W - 2*MARGIN, W - SIDEBAR_W - 2*MARGIN]
-    body_table = Table([[sid_frame, main_frame]], colWidths=col_widths)
+    body_table = Table([[sid_frame, main_frame]],
+                       colWidths=[SIDE_W, MAIN_W])
     body_table.setStyle(TableStyle([
-        ("VALIGN",      (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (0,0),   0),
-        ("RIGHTPADDING",(0,0), (0,0),   8),
-        ("LEFTPADDING", (1,0), (1,0),   10),
-        ("RIGHTPADDING",(1,0), (1,0),   0),
-        ("TOPPADDING",  (0,0), (-1,-1), 0),
+        ("VALIGN",       (0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",  (0,0),(0,0),   0),
+        ("RIGHTPADDING", (0,0),(0,0),   6),
+        ("LEFTPADDING",  (1,0),(1,0),   10),
+        ("RIGHTPADDING", (1,0),(1,0),   0),
+        ("TOPPADDING",   (0,0),(-1,-1), 0),
         ("BOTTOMPADDING",(0,0),(-1,-1), 0),
     ]))
 
-    # Table header (pleine largeur)
-    hdr_left_frame  = KeepInFrame(HDR_W * 0.62, HDR_HH, hdr_left,  mode="shrink")
-    hdr_right_frame = KeepInFrame(HDR_W * 0.35, HDR_HH, hdr_right, mode="shrink")
-    hdr_table = Table([[hdr_left_frame, hdr_right_frame]],
-                      colWidths=[HDR_W * 0.62, HDR_W * 0.38])
-    hdr_table.setStyle(TableStyle([
-        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
-        ("LEFTPADDING",  (0,0), (-1,-1), 0),
-        ("RIGHTPADDING", (0,0), (-1,-1), 0),
-        ("TOPPADDING",   (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-        ("ALIGN",        (1,0), (1,0),   "RIGHT"),
-    ]))
-
-    # Document final
+    buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=MARGIN, rightMargin=MARGIN,
         topMargin=MARGIN,  bottomMargin=MARGIN,
     )
-
-    story = [hdr_table, Spacer(1, 8), body_table]
-    doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
+    doc.build([hdr_table, Spacer(1, 6), body_table],
+              onFirstPage=draw_bg, onLaterPages=draw_bg)
     return buf.getvalue()
+
 
 async def generate_cv_pdf(cv_data: dict, offer_title: str = "") -> bytes:
     """Wrapper async — délègue à un thread pour ne pas bloquer l'event loop."""
@@ -2118,6 +2085,13 @@ async def dashboard_ui():
     if f.exists():
         return FileResponse(str(f), media_type="text/html")
     return HTMLResponse("<h2>dashboard.html introuvable dans /static/</h2>", status_code=404)
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    f = _static / "favicon.ico"
+    if f.exists():
+        return FileResponse(str(f), media_type="image/x-icon")
+    return HTMLResponse("", status_code=204)
 
 # ── Health ───────────────────────────────────────────
 @app.get("/health", tags=["Système"])
