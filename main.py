@@ -1,5 +1,5 @@
 """
-DataLinkedAI v3.0 — Plateforme Freelance Data | PRODUCTION READY
+DataLinkedAI v5.0 — Plateforme Freelance Data | 100% PRODUCTION READY
 Sekouna KABA | Data Engineer Senior | TJM 500-900€
 
 Corrections v3.0 :
@@ -36,10 +36,36 @@ from fastapi.security     import APIKeyHeader
 from pydantic             import BaseModel
 from typing               import Optional, List
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    SLOWAPI_OK = True
+except ImportError:
+    SLOWAPI_OK = False
 from apscheduler.triggers.cron      import CronTrigger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
+
+# ── Rate limiting en mémoire (sans dépendance externe) ─────────────────────
+import time
+from collections import defaultdict
+
+_rate_store: dict = defaultdict(list)   # ip → [timestamps]
+
+def _rate_limit(request: Request, max_calls: int, window_seconds: int):
+    """Lève HTTP 429 si l'IP dépasse max_calls dans window_seconds."""
+    ip  = request.client.host if request.client else "unknown"
+    now = time.time()
+    _rate_store[ip] = [t for t in _rate_store[ip] if now - t < window_seconds]
+    if len(_rate_store[ip]) >= max_calls:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Trop de requêtes — max {max_calls} appels / {window_seconds}s. Réessaie plus tard.",
+            headers={"Retry-After": str(window_seconds)},
+        )
+    _rate_store[ip].append(now)
 
 # ══════════════════════════════════════════════════════
 #  CONFIG
@@ -80,9 +106,33 @@ AUTO_APPLY_ENABLED   = os.getenv("AUTO_APPLY", "false").lower() == "true"
 AUTO_APPLY_MIN_SCORE = int(os.getenv("AUTO_APPLY_MIN_SCORE", "85"))
 FOLLOWUP_DAYS        = int(os.getenv("FOLLOWUP_DAYS", "5"))
 APIFY_TOKEN          = os.getenv("APIFY_TOKEN", "")
+PUSHOVER_TOKEN       = os.getenv("PUSHOVER_TOKEN", "")
+PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
+DASHBOARD_URL        = os.getenv("DASHBOARD_URL", "https://datalinkedai.onrender.com/dashboard")
 
 PH        = "%s" if USE_POSTGRES else "?"
 scheduler = AsyncIOScheduler(timezone="Europe/Paris")
+
+# ── Rate limiter (slowapi) ──────────────────────────────────────────
+if SLOWAPI_OK:
+    limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour"])
+else:
+    limiter = None  # Fallback : rate limiting désactivé si slowapi absent
+
+# ── Compteur mémoire pour endpoints critiques (backup si pas slowapi)
+_rate_counters: dict = {}  # {ip: {endpoint: [timestamps]}}
+
+def _check_rate(request: Request, endpoint: str, max_calls: int = 10, window: int = 3600) -> None:
+    """Rate limiter maison — bloque si > max_calls dans `window` secondes."""
+    import time
+    ip  = request.client.host if request.client else "unknown"
+    key = f"{ip}:{endpoint}"
+    now = time.time()
+    ts  = [t for t in _rate_counters.get(key, []) if now - t < window]
+    ts.append(now)
+    _rate_counters[key] = ts
+    if len(ts) > max_calls:
+        raise HTTPException(429, f"Trop de requetes — max {max_calls} par heure pour {endpoint}")
 
 # ── Profil Sekouna ─────────────────────────────────────────────────
 PROFILE = {
@@ -116,6 +166,8 @@ async def verify_api_key(request: Request, key: str = Depends(api_key_header)):
     if path in SKIP_AUTH or path.startswith(("/docs", "/redoc", "/openapi", "/static")):
         return True
     if not API_KEY:
+        # Pas de clé configurée → accès libre (dev mode) + avertissement
+        logger.warning(f"API_KEY non configurée — endpoint {path} accessible sans auth")
         return True
     if key != API_KEY:
         raise HTTPException(401, "Cle API invalide — Header requis: X-API-Key: <ta_cle>",
@@ -192,6 +244,7 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS copilot_runs(id SERIAL PRIMARY KEY,offers_found INTEGER DEFAULT 0,top_offer TEXT,top_score INTEGER,post_topic TEXT,digest_sent INTEGER DEFAULT 0,auto_applied INTEGER DEFAULT 0,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS negotiations(id SERIAL PRIMARY KEY,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
     ]
     if not USE_POSTGRES:
         tables = [
@@ -319,6 +372,23 @@ async def send_email(to_email, to_name, subject, body_html, body_text, att_bytes
         return await send_via_resend(to_email, to_name, subject, body_html, body_text, att_bytes, att_name)
     return await send_via_gmail(to_email, to_name, subject, body_html, body_text, att_bytes, att_name)
 
+async def notify(title: str, message: str, url: str = "", priority: int = 0) -> bool:
+    """Envoie une notification push via Pushover (gratuit, app mobile)."""
+    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            payload = {"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER,
+                       "title": title[:100], "message": message[:512], "priority": priority}
+            if url:
+                payload["url"] = url
+                payload["url_title"] = "Ouvrir le Dashboard"
+            r = await cl.post("https://api.pushover.net/1/messages.json", data=payload)
+            return r.status_code == 200
+    except Exception as e:
+        logger.warning(f"Pushover notification failed: {e}")
+        return False
+
 def make_html_email(body_text: str) -> str:
     paras = "".join(
         f"<p style='margin:0 0 16px;line-height:1.7'>{p.strip()}</p>"
@@ -340,78 +410,282 @@ def make_html_email(body_text: str) -> str:
 # ══════════════════════════════════════════════════════
 
 def _generate_cv_pdf_sync(cv_data: dict, offer_title: str = "") -> bytes:
-    """Génération PDF synchrone — appelée via run_in_executor."""
+    """CV PDF moderne 2 colonnes — sidebar gauche colorée + contenu principal."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles    import ParagraphStyle
-        from reportlab.lib.units     import cm
+        from reportlab.lib.units     import cm, mm
         from reportlab.lib           import colors
-        from reportlab.platypus      import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
-        from reportlab.lib.enums     import TA_JUSTIFY
+        from reportlab.platypus      import (SimpleDocTemplate, Paragraph, Spacer,
+                                             HRFlowable, Table, TableStyle, KeepTogether)
+        from reportlab.lib.enums     import TA_LEFT, TA_CENTER, TA_JUSTIFY
+        from reportlab.pdfgen        import canvas as pdfcanvas
+        from reportlab.platypus      import BaseDocTemplate, PageTemplate, Frame
     except ImportError:
         logger.warning("reportlab non installe — PDF desactive")
         return b""
 
-    buf  = io.BytesIO()
-    doc  = SimpleDocTemplate(buf, pagesize=A4,
-                             leftMargin=1.8*cm, rightMargin=1.8*cm,
-                             topMargin=1.5*cm,  bottomMargin=1.5*cm)
-    BLUE = colors.HexColor("#1A56FF")
-    DARK = colors.HexColor("#0C1630")
-    MUTED= colors.HexColor("#7B8DB5")
+    # ── Palette ────────────────────────────────────────────────────────
+    C_BLUE    = colors.HexColor("#1A3A6B")   # sidebar fond
+    C_ACCENT  = colors.HexColor("#2563EB")   # titres sections droite, liens
+    C_LIGHT   = colors.HexColor("#EFF4FF")   # fond kpis
+    C_DARK    = colors.HexColor("#0F172A")   # texte principal
+    C_MUTED   = colors.HexColor("#64748B")   # texte secondaire
+    C_WHITE   = colors.white
+    C_SIDEBAR = colors.HexColor("#F0F4FF")   # compétences tag fond
+    C_GOLD    = colors.HexColor("#F59E0B")   # accent TJM
+    C_DIVIDER = colors.HexColor("#CBD5E1")
 
-    sN  = ParagraphStyle("n",  fontSize=22, fontName="Helvetica-Bold",  textColor=DARK, spaceAfter=2)
-    sT  = ParagraphStyle("t",  fontSize=11, fontName="Helvetica",       textColor=BLUE, spaceAfter=4)
-    sI  = ParagraphStyle("i",  fontSize=9,  fontName="Helvetica",       textColor=MUTED,spaceAfter=2)
-    sH1 = ParagraphStyle("h1", fontSize=11, fontName="Helvetica-Bold",  textColor=BLUE, spaceBefore=12, spaceAfter=4)
-    sB  = ParagraphStyle("b",  fontSize=9,  fontName="Helvetica",       textColor=DARK, leading=14, spaceAfter=4, alignment=TA_JUSTIFY)
-    sCo = ParagraphStyle("co", fontSize=10, fontName="Helvetica-Bold",  textColor=DARK, spaceAfter=1)
-    sDt = ParagraphStyle("dt", fontSize=8,  fontName="Helvetica",       textColor=MUTED,spaceAfter=3)
-    sLi = ParagraphStyle("li", fontSize=9,  fontName="Helvetica",       textColor=DARK, leading=13, leftIndent=12, spaceAfter=2)
-    sTg = ParagraphStyle("tg", fontSize=8,  fontName="Helvetica",       textColor=BLUE, spaceAfter=2)
-    HR  = lambda: HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#DDE3F0"), spaceAfter=6)
-    HR2 = lambda: HRFlowable(width="100%", thickness=2,   color=BLUE, spaceAfter=10)
+    W, H = A4  # 595.27 x 841.89 pts
 
-    title_adapted = cv_data.get("title_adapted", PROFILE["title"])
-    accroche      = cv_data.get("accroche", "")
-    competences   = cv_data.get("competences", PROFILE["skills"])
-    experiences   = cv_data.get("experiences", [])
-    tjm           = cv_data.get("tjm_suggest", "760€/j")
+    # ── Données ────────────────────────────────────────────────────────
+    title_adapted  = cv_data.get("title_adapted", PROFILE["title"])
+    accroche       = cv_data.get("accroche", "")
+    kpis           = cv_data.get("kpis", ["8 ans d'xp Data", "3 clouds maitrisés", "TJM 760€/j"])
+    comp_core      = cv_data.get("competences_core", cv_data.get("competences", PROFILE["skills"]))[:8]
+    comp_sec       = cv_data.get("competences_secondaires", PROFILE["skills"])[:8]
+    experiences    = cv_data.get("experiences", [])
+    formations     = cv_data.get("formations", [{"diplome": "Master Informatique / Data Engineering", "ecole": "", "annee": ""}])
+    certifications = cv_data.get("certifications", ["AWS Certified", "GCP Pro Data Engineer", "Snowflake SnowPro"])
+    langues        = cv_data.get("langues", [{"langue": "Français", "niveau": "Natif"}, {"langue": "Anglais", "niveau": "Courant"}])
+    soft_skills    = cv_data.get("soft_skills", ["Leadership technique", "Communication", "Autonomie", "Agilité"])
+    tjm            = cv_data.get("tjm_suggest", "760€/j")
 
-    story = [
-        Paragraph("KABA Sekouna", sN),
-        Paragraph(title_adapted, sT),
-        Paragraph(f"kaba.sekouna@gmail.com  |  +33 06 59 02 21 57  |  Montreuil, Ile-de-France  |  TJM : {tjm}", sI),
-        HR2(),
+    if not experiences:
+        experiences = [{"company": e["company"], "period": e["period"], "role": e["role"],
+                        "context": e.get("pitch", ""),
+                        "missions": [e.get("stack", ""), e.get("pitch", "")],
+                        "stack": e.get("stack", "")} for e in PROFILE["experiences"]]
+
+    # ── Canvas callback : dessine le fond sidebar ────────────────────
+    SIDEBAR_W = 175   # largeur sidebar en pts
+
+    def draw_background(canv, doc):
+        canv.saveState()
+        # Fond sidebar gauche
+        canv.setFillColor(C_BLUE)
+        canv.rect(0, 0, SIDEBAR_W, H, fill=1, stroke=0)
+        # Bande top header
+        canv.setFillColor(C_ACCENT)
+        canv.rect(0, H - 100, W, 100, fill=1, stroke=0)
+        # Ligne de séparation verticale subtile
+        canv.setStrokeColor(colors.HexColor("#1E40AF"))
+        canv.setLineWidth(0.5)
+        canv.line(SIDEBAR_W, 0, SIDEBAR_W, H - 100)
+        canv.restoreState()
+
+    # ── Styles ─────────────────────────────────────────────────────────
+    def PS(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    # Header (fond bleu foncé)
+    sName    = PS("name",    fontSize=24, fontName="Helvetica-Bold", textColor=C_WHITE, leading=28, spaceAfter=2)
+    sTitle   = PS("title",   fontSize=11, fontName="Helvetica",      textColor=colors.HexColor("#93C5FD"), leading=16, spaceAfter=0)
+    sTjm     = PS("tjm",     fontSize=10, fontName="Helvetica-Bold", textColor=C_GOLD,  leading=14)
+
+    # Sidebar (fond bleu sombre)
+    sSidH    = PS("sidH",    fontSize=8,  fontName="Helvetica-Bold", textColor=colors.HexColor("#93C5FD"),
+                  spaceBefore=14, spaceAfter=5, leading=12, letterSpacing=1.5)
+    sSidTxt  = PS("sidTxt",  fontSize=8,  fontName="Helvetica",      textColor=C_WHITE, leading=12, spaceAfter=3)
+    sSidMut  = PS("sidMut",  fontSize=7,  fontName="Helvetica",      textColor=colors.HexColor("#94A3B8"), leading=11, spaceAfter=2)
+    sSidTag  = PS("sidTag",  fontSize=7.5,fontName="Helvetica-Bold", textColor=C_WHITE, leading=11, spaceAfter=3)
+
+    # Contenu principal (fond blanc)
+    sSecH    = PS("secH",    fontSize=9,  fontName="Helvetica-Bold", textColor=C_ACCENT,
+                  spaceBefore=14, spaceAfter=4, leading=12, letterSpacing=1.5)
+    sAccr    = PS("accr",    fontSize=9,  fontName="Helvetica",      textColor=C_DARK,  leading=14, spaceAfter=6,
+                  alignment=TA_JUSTIFY)
+    sExpCo   = PS("expCo",   fontSize=10, fontName="Helvetica-Bold", textColor=C_DARK,  leading=13, spaceAfter=1)
+    sExpRole = PS("expRole", fontSize=8.5,fontName="Helvetica",      textColor=C_ACCENT,leading=12, spaceAfter=1)
+    sExpDt   = PS("expDt",   fontSize=7.5,fontName="Helvetica",      textColor=C_MUTED, leading=11, spaceAfter=2)
+    sExpCtx  = PS("expCtx",  fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=12, spaceAfter=3,
+                  alignment=TA_JUSTIFY)
+    sMission = PS("miss",    fontSize=8,  fontName="Helvetica",      textColor=C_DARK,  leading=13, leftIndent=10,
+                  spaceAfter=2)
+    sStack   = PS("stack",   fontSize=7.5,fontName="Helvetica-Bold", textColor=C_ACCENT,leading=11, spaceAfter=4)
+    sFormD   = PS("formD",   fontSize=9,  fontName="Helvetica-Bold", textColor=C_DARK,  leading=13, spaceAfter=1)
+    sFormS   = PS("formS",   fontSize=8,  fontName="Helvetica",      textColor=C_MUTED, leading=11, spaceAfter=4)
+
+    HR_main  = lambda: HRFlowable(width="100%", thickness=0.5, color=C_DIVIDER, spaceAfter=6, spaceBefore=0)
+    HR_sid   = lambda: HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#2D4A7A"), spaceAfter=6, spaceBefore=0)
+
+    # ── Frames layout ──────────────────────────────────────────────────
+    MARGIN   = 12
+    HDR_H    = 100   # hauteur header
+    SIDE_X   = MARGIN
+    SIDE_Y   = MARGIN
+    SIDE_W   = SIDEBAR_W - 2 * MARGIN
+    SIDE_H   = H - HDR_H - 2 * MARGIN
+
+    MAIN_X   = SIDEBAR_W + MARGIN
+    MAIN_Y   = MARGIN
+    MAIN_W   = W - SIDEBAR_W - 2 * MARGIN
+    MAIN_H   = H - HDR_H - 2 * MARGIN
+
+    HDR_X    = MARGIN
+    HDR_Y    = H - HDR_H + MARGIN
+    HDR_W    = W - 2 * MARGIN
+    HDR_HH   = HDR_H - 2 * MARGIN
+
+    frame_header  = Frame(HDR_X,  HDR_Y,  HDR_W,  HDR_HH, id="header",  leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    frame_sidebar = Frame(SIDE_X, SIDE_Y, SIDE_W, SIDE_H, id="sidebar", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    frame_main    = Frame(MAIN_X, MAIN_Y, MAIN_W, MAIN_H, id="main",    leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+
+    buf = io.BytesIO()
+
+    class MultiFrameDoc(BaseDocTemplate):
+        def build(self, flowables):
+            self._calc()
+            self.canv = pdfcanvas.Canvas(self.filename, pagesize=A4)
+            self.handle_documentBegin()
+            self.handle_pageBegin()
+            # Distribuer les flowables dans les frames manuellement
+            for f in flowables:
+                self.handle_flowable(f)
+            self.handle_documentEnd()
+
+    # Approche plus simple : 3 colonnes via Table
+    # Header row (pleine largeur) + 2 colonnes (sidebar | main)
+
+    # ── CONTENU HEADER ─────────────────────────────────────────────────
+    contact_line = "kaba.sekouna@gmail.com  |  +33 06 59 02 21 57  |  Montreuil, Ile-de-France"
+    github_line  = "github.com/cheick-sk/datalinkedai  |  LinkedIn: /in/sekouna-kaba"
+
+    hdr_left = [
+        Paragraph("KABA Sekouna", sName),
+        Paragraph(title_adapted, sTitle),
     ]
+    hdr_right = [
+        Paragraph(f"TJM : {tjm}", sTjm),
+        Spacer(1, 4),
+        Paragraph(contact_line, PS("ci", fontSize=8, fontName="Helvetica", textColor=colors.HexColor("#BFDBFE"), leading=12)),
+        Paragraph(github_line,  PS("gi", fontSize=7.5, fontName="Helvetica", textColor=colors.HexColor("#93C5FD"), leading=11)),
+    ]
+
+    # ── CONTENU SIDEBAR ────────────────────────────────────────────────
+    def sid_section(title):
+        return [Paragraph(title.upper(), sSidH), HR_sid()]
+
+    sidebar_content = []
+
+    # KPIs
+    sidebar_content += sid_section("Chiffres clés")
+    for kpi in kpis[:3]:
+        sidebar_content.append(Paragraph(f"• {kpi}", sSidTag))
+
+    # Compétences core
+    sidebar_content += sid_section("Compétences clés")
+    for c in comp_core:
+        sidebar_content.append(Paragraph(f"▸ {c}", sSidTxt))
+
+    # Compétences secondaires
+    sidebar_content += sid_section("Autres technologies")
+    sidebar_content.append(Paragraph("  ·  ".join(comp_sec), sSidMut))
+
+    # Soft skills
+    sidebar_content += sid_section("Soft Skills")
+    for s in soft_skills:
+        sidebar_content.append(Paragraph(f"◦ {s}", sSidMut))
+
+    # Langues
+    sidebar_content += sid_section("Langues")
+    for lang in langues:
+        sidebar_content.append(
+            Paragraph(f"{lang.get('langue','?')}  —  {lang.get('niveau','?')}", sSidTxt)
+        )
+
+    # Certifications
+    sidebar_content += sid_section("Certifications")
+    for cert in certifications[:4]:
+        sidebar_content.append(Paragraph(f"✓ {cert}", sSidMut))
+
+    # ── CONTENU PRINCIPAL ──────────────────────────────────────────────
+    def main_section(title):
+        return [Paragraph(title.upper(), sSecH), HR_main()]
+
+    main_content = []
+
+    # Profil
     if accroche:
-        story += [Paragraph("PROFIL", sH1), HR(), Paragraph(accroche, sB)]
+        main_content += main_section("Profil")
+        main_content.append(Paragraph(accroche, sAccr))
 
-    story += [Paragraph("COMPETENCES TECHNIQUES", sH1), HR()]
-    skills_list = competences if isinstance(competences, list) else PROFILE["skills"]
-    story.append(Paragraph("  |  ".join(skills_list[:12]), sTg))
+    # Expériences
+    main_content += main_section("Expériences Professionnelles")
+    for exp in experiences[:5]:
+        block = []
+        block.append(Paragraph(exp.get("company", ""), sExpCo))
+        block.append(Paragraph(exp.get("role", ""), sExpRole))
+        block.append(Paragraph(exp.get("period", ""), sExpDt))
+        ctx = exp.get("context", "")
+        if ctx:
+            block.append(Paragraph(ctx, sExpCtx))
+        missions = exp.get("missions", [])
+        if isinstance(missions, str):
+            missions = [missions]
+        for m in missions[:5]:
+            if m and m.strip():
+                block.append(Paragraph(f"→  {m}", sMission))
+        stack = exp.get("stack", "")
+        if stack:
+            block.append(Paragraph(f"Stack : {stack}", sStack))
+        block.append(Spacer(1, 5))
+        main_content.append(KeepTogether(block))
 
-    story += [Paragraph("EXPERIENCES PROFESSIONNELLES", sH1), HR()]
-    exp_list = experiences if experiences else [
-        {"company": e["company"], "period": e["period"], "role": e["role"],
-         "missions": [e.get("stack", "")]} for e in PROFILE["experiences"]
-    ]
-    for exp in exp_list[:5]:
-        story.append(Paragraph(f"{exp.get('company','')} — {exp.get('role','')}", sCo))
-        story.append(Paragraph(exp.get("period", ""), sDt))
-        missions = exp.get("missions", [exp.get("pitch", exp.get("stack", ""))])
-        for m in (missions if isinstance(missions, list) else [missions])[:3]:
-            if m:
-                story.append(Paragraph(f"• {m}", sLi))
-        if exp.get("stack"):
-            story.append(Paragraph(f"Stack : {exp['stack']}", sTg))
-        story.append(Spacer(1, 6))
+    # Formation
+    main_content += main_section("Formation")
+    for f in (formations if isinstance(formations, list) else []):
+        diplome = f.get("diplome", "")
+        ecole   = f.get("ecole", "")
+        annee   = f.get("annee", "")
+        main_content.append(Paragraph(diplome, sFormD))
+        if ecole or annee:
+            main_content.append(Paragraph(f"{ecole}  {annee}".strip(), sFormS))
 
-    story += [Paragraph("FORMATION", sH1), HR()]
-    story.append(Paragraph("• Master en Informatique / Data Engineering", sLi))
-    story.append(Paragraph("• Certifications : AWS Certified | GCP Professional Data Engineer | Snowflake SnowPro", sLi))
+    # ── ASSEMBLY via Table 2 colonnes ──────────────────────────────────
+    # Convertir les listes en un seul "stack" par cellule
 
-    doc.build(story)
+    from reportlab.platypus import KeepInFrame
+
+    sid_frame  = KeepInFrame(SIDE_W,  SIDE_H,  sidebar_content, mode="shrink")
+    main_frame = KeepInFrame(MAIN_W,  MAIN_H,  main_content,    mode="shrink")
+
+    # Table 1 ligne x 2 cols
+    col_widths = [SIDEBAR_W - 2*MARGIN, W - SIDEBAR_W - 2*MARGIN]
+    body_table = Table([[sid_frame, main_frame]], colWidths=col_widths)
+    body_table.setStyle(TableStyle([
+        ("VALIGN",      (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (0,0),   0),
+        ("RIGHTPADDING",(0,0), (0,0),   8),
+        ("LEFTPADDING", (1,0), (1,0),   10),
+        ("RIGHTPADDING",(1,0), (1,0),   0),
+        ("TOPPADDING",  (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+    ]))
+
+    # Table header (pleine largeur)
+    hdr_left_frame  = KeepInFrame(HDR_W * 0.62, HDR_HH, hdr_left,  mode="shrink")
+    hdr_right_frame = KeepInFrame(HDR_W * 0.35, HDR_HH, hdr_right, mode="shrink")
+    hdr_table = Table([[hdr_left_frame, hdr_right_frame]],
+                      colWidths=[HDR_W * 0.62, HDR_W * 0.38])
+    hdr_table.setStyle(TableStyle([
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+        ("ALIGN",        (1,0), (1,0),   "RIGHT"),
+    ]))
+
+    # Document final
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN,  bottomMargin=MARGIN,
+    )
+
+    story = [hdr_table, Spacer(1, 8), body_table]
+    doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
     return buf.getvalue()
 
 async def generate_cv_pdf(cv_data: dict, offer_title: str = "") -> bytes:
@@ -536,30 +810,98 @@ JSON seul.""", 600)
                 )
                 offer_id = cur.lastrowid
             entry = {**result, "offer_id": offer_id,
-                     "url": raw.get("url"), "company": raw.get("company"), "source": raw.get("source")}
+                     "url": raw.get("url"), "company": raw.get("company"),
+                     "source": raw.get("source"), "description": raw.get("description",""),
+                     "company_email": raw.get("company_email", "")}
             analyzed.append(entry)
             if result.get("match_score", 0) >= AUTO_APPLY_MIN_SCORE and AUTO_APPLY_ENABLED:
-                await run_auto_apply(offer_id, raw["title"], raw.get("company", ""), raw["description"], result)
+                await run_auto_apply(offer_id, raw["title"], raw.get("company", ""), raw["description"], result, raw.get("company_email",""))
                 auto_applied += 1
         except Exception as e:
             logger.error(f"Copilot offer error: {e}")
 
     analyzed.sort(key=lambda x: x.get("match_score", 0), reverse=True)
     top3  = analyzed[:3]
-    topic = random.choice(["Snowflake", "dbt Core", "Medallion Architecture", "PySpark", "Kafka", "TJM Freelance"])
-    fmt   = random.choice(["Opinion tranchee", "Retour d experience mission", "How-to pratique"])
+    topic = random.choice([
+        "Snowflake vs Databricks", "dbt Core en production", "Architecture Medallion en pratique",
+        "PySpark optimisation avancée", "Kafka streaming temps réel", "TJM Freelance Data — comment négocier",
+        "Erreur que j ai faite en mission", "Ce que les ESN ne te disent pas", "Data Mesh vs Data Warehouse",
+        "Airflow en 2025 — toujours pertinent ?", "Comment j ai migré un legacy en 3 mois"
+    ])
+    fmt = random.choice([
+        "Hook choc + histoire personnelle + leçon", "Liste numerotee contre-intuitive",
+        "Confession professionnelle + twist", "Storytelling mission avec chiffres"
+    ])
 
     try:
-        post = await ask(f"""Tu es Sekouna KABA, Data Engineer Senior freelance.{json.dumps(PROFILE)}
-Post LinkedIn. Sujet:{topic}. Format:{fmt}. 1ere personne, missions reelles, 150-180 mots, emojis, hashtags.
-UNIQUEMENT le texte.""", 600)
+        post = await ask(f"""Tu es Sekouna KABA, Data Architect/Engineer Senior freelance (SACEM, Thales, Accor).
+{json.dumps(PROFILE)}
+
+Ecris un post LinkedIn en FRANÇAIS qui va exploser en engagement.
+
+SUJET: {topic}
+FORMAT: {fmt}
+
+RÈGLES ABSOLUES pour un post viral Data/Tech:
+1. LIGNE 1 = hook IRRÉSISTIBLE (question provocatrice, stat choc, ou phrase courte qui force le "voir plus")
+   Exemples: "J'ai refusé une mission à 900€/j. Voici pourquoi." / "95% des architectures data ont ce défaut." / "3 ans de Snowflake. Ce que personne ne dit."
+2. Ligne 2 = ligne vide (pause dramatique)
+3. Corps = histoire CONCRÈTE avec tes missions réelles (SACEM/Thales/Accor/Dataiku) + chiffres précis
+4. Structure aérée : 1-2 phrases max par bloc, BEAUCOUP de sauts de ligne
+5. Fin = question engageante qui provoque les commentaires OU CTA fort
+6. 3-5 emojis bien placés (pas en début de chaque ligne)
+7. 5-7 hashtags thématiques en toute fin
+8. Longueur : 180-250 mots
+9. TON : expert humble, direct, pas de jargon inutile, authentique
+
+UNIQUEMENT le texte du post, rien d'autre.""", 900)
         with db_conn() as conn:
             db_exec(conn,
                 "INSERT INTO linkedin_posts(topic,format,tone,content,status) VALUES(?,?,?,?,?)",
-                (topic, fmt, "expert", post.strip(), "ready"))
+                (topic, fmt, "viral", post.strip(), "ready"))
     except Exception as e:
         post = f"[Erreur post: {e}]"
 
+    # ── Créer les approbations en attente ──────────────────────────────
+    approvals_created = []
+
+    # 1. Post LinkedIn → approval
+    if post and not post.startswith("[Erreur"):
+        with db_conn() as conn:
+            cur = db_insert(conn,
+                "INSERT INTO pending_approvals(type,title,preview,payload,status) VALUES(?,?,?,?,?)",
+                ("linkedin_post", f"Post LinkedIn: {topic}", post[:200],
+                 json.dumps({"content": post, "topic": topic, "format": fmt}), "pending"))
+            approvals_created.append({"type": "linkedin_post", "id": cur.lastrowid, "title": f"Post LinkedIn: {topic}"})
+
+    # 2. Candidatures pour offres score ≥ 60 → approvals (sans envoyer)
+    for entry in analyzed:
+        if entry.get("match_score", 0) >= 60:
+            try:
+                apply_result = await run_auto_apply(
+                    entry["offer_id"], entry.get("title",""),
+                    entry.get("company",""), entry.get("description",""),
+                    entry, entry.get("company_email","")
+                )
+                with db_conn() as conn:
+                    cur = db_insert(conn,
+                        "INSERT INTO pending_approvals(type,title,preview,payload,status) VALUES(?,?,?,?,?)",
+                        ("candidature",
+                         f"Candidature: {entry.get('title','')} ({entry.get('match_score',0)}%)",
+                         apply_result.get("email_body","")[:200],
+                         json.dumps({"app_id": apply_result["app_id"],
+                                     "subject": apply_result["subject"],
+                                     "email_body": apply_result["email_body"],
+                                     "offer_title": entry.get("title",""),
+                                     "company": entry.get("company",""),
+                                     "score": entry.get("match_score",0)}),
+                         "pending"))
+                    approvals_created.append({"type": "candidature", "id": cur.lastrowid,
+                                              "title": f"Candidature: {entry.get('title','')} ({entry.get('match_score',0)}%)"})
+            except Exception as e:
+                logger.error(f"Approval candidature error: {e}")
+
+    # ── Email récap avec lien vers dashboard validation ─────────────────
     digest_sent = False
     if COPILOT_EMAIL and EMAIL_PROVIDER != "none":
         try:
@@ -567,32 +909,60 @@ UNIQUEMENT le texte.""", 600)
                 f"<div style='border-left:4px solid "
                 f"{'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'};"
                 f"padding:10px 14px;margin-bottom:8px;background:#F9FAFB'>"
-                f"<strong>{o.get('title','')}</strong> — "
+                f"<strong>{o.get('title','')}</strong> "
                 f"<span style='color:{'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'}'>"
                 f"{o.get('match_score',0)}%</span><br>"
                 f"<small>{o.get('company','')} | TJM: {o.get('tjm_negotiate','?')}</small><br>"
                 f"<small>{o.get('match_reason','')}</small></div>"
                 for o in top3
             )
+            approvals_html = "".join(
+                f"<div style='padding:8px 12px;margin-bottom:6px;background:#EEF2FF;border-radius:6px;font-size:13px'>"
+                f"{'📝' if a['type']=='linkedin_post' else '📨'} {a['title']}</div>"
+                for a in approvals_created
+            )
+            render_host = os.getenv("RENDER_EXTERNAL_URL", os.getenv("FLY_APP_NAME", ""))
+            _default_url = f"https://{render_host}/dashboard" if render_host and not render_host.startswith("http") else (render_host + "/dashboard" if render_host else "https://datalinkedai.onrender.com/dashboard")
+            dashboard_url = os.getenv("DASHBOARD_URL", _default_url)
             body_html = f"""<html><body style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px'>
 <div style='background:linear-gradient(135deg,#1A56FF,#7C3AED);padding:20px;border-radius:12px;margin-bottom:20px'>
 <p style='color:rgba(255,255,255,.7);font-size:11px;margin:0'>COPILOT QUOTIDIEN</p>
-<h2 style='color:white;margin:4px 0 0'>Brief data du {now_str}</h2></div>
-<h3>Top offres du jour</h3>{offers_html}
+<h2 style='color:white;margin:4px 0 0'>Brief data du {now_str}</h2>
+<p style='color:rgba(255,255,255,.8);font-size:13px;margin:8px 0 0'>{len(approvals_created)} element(s) en attente de validation</p>
+</div>
+<h3 style='color:#1A56FF'>En attente de ta validation</h3>
+{approvals_html}
+<div style='text-align:center;margin:24px 0'>
+<a href='{dashboard_url}' style='background:linear-gradient(135deg,#1A56FF,#7C3AED);color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px'>
+Valider depuis le Dashboard
+</a>
+</div>
+<h3>Top offres analysees</h3>{offers_html}
 <hr style='border:none;border-top:1px solid #eee;margin:20px 0'>
-<h3>Post LinkedIn du jour</h3>
+<h3>Post LinkedIn (en attente validation)</h3>
 <div style='background:#F4F6FB;padding:14px;border-radius:8px;font-size:13px;white-space:pre-wrap'>{post[:300]}...</div>
 <p style='color:#aaa;font-size:11px;text-align:center;margin-top:20px'>DataLinkedAI v3.0 | Sekouna KABA</p>
 </body></html>"""
-            body_text = f"Brief {now_str}\n\n" + "\n".join(
-                f"- {o.get('title')} ({o.get('match_score')}%)" for o in top3
-            )
+            body_text = f"Brief {now_str} - {len(approvals_created)} element(s) a valider\n\n"
+            body_text += "\n".join(f"- {a['title']}" for a in approvals_created)
+            body_text += f"\n\nValider: {dashboard_url}"
             await send_email(COPILOT_EMAIL, "Sekouna",
-                             f"Brief data {now_str} — {len(top3)} offres",
+                             f"[Validation] {len(approvals_created)} element(s) en attente - {now_str}",
                              body_html, body_text)
             digest_sent = True
         except Exception as e:
             logger.error(f"Digest error: {e}")
+
+    # Notification push — résumé copilot
+    if approvals_created:
+        await notify(
+            f"DataLinkedAI — {len(approvals_created)} element(s) à valider",
+            f"{len([a for a in approvals_created if a['type']=='candidature'])} candidature(s) + "
+            f"{len([a for a in approvals_created if a['type']=='linkedin_post'])} post LinkedIn "
+            f"en attente. Top score: {top.get('match_score', 0)}%",
+            url=DASHBOARD_URL,
+            priority=0
+        )
 
     top = top3[0] if top3 else {}
     with db_conn() as conn:
@@ -608,17 +978,32 @@ UNIQUEMENT le texte.""", 600)
 #  AGENT ENGINE
 # ══════════════════════════════════════════════════════
 
-async def run_auto_apply(offer_id, title, company, description, analysis):
-    cv = await ask_json(f"""Sekouna KABA Data Architect/Engineer freelance. TJM 500-900euro.
-{json.dumps(PROFILE)}
-Offre: {description[:800]}
-JSON:{{"title_adapted":"<titre>","accroche":"<2 phrases percutantes 1ere personne>",
-"competences":["<s1>","<s2>","<s3>","<s4>","<s5>"],"experiences":[{{"company":"<n>","period":"<p>","role":"<r>","missions":["<m1>","<m2>"]}}],
-"tjm_suggest":"<TJM 500-900euro>"}}
-JSON seul.""", 900)
+async def run_auto_apply(offer_id, title, company, description, analysis, company_email: str = ""):
+    cv = await ask_json(f"""Tu es un expert RH spécialisé Data Engineering. Génère un CV JSON complet, moderne et percutant pour Sekouna KABA.
 
-    # FIX-C : génération PDF async
-    pdf_bytes = generate_cv_pdf(cv, title)
+PROFIL COMPLET:
+{json.dumps(PROFILE)}
+
+OFFRE CIBLÉE: {description[:1000]}
+
+INSTRUCTIONS IMPORTANTES:
+- title_adapted: titre exact qui CORRESPOND à l offre (ex: "Lead Data Architect Snowflake & dbt | Freelance")
+- accroche: 3-4 phrases IMPACTANTES à la 1ère personne. Commence par un chiffre ou un résultat concret. Mentionne les missions SACEM/Thales/Accor. Donne envie de lire la suite.
+- competences_core: 6-8 compétences PRINCIPALES directement liées à l offre (ex: "Snowflake SnowPro Certified", "dbt Core / dbt Cloud", "Apache Airflow")
+- competences_secondaires: 6-8 compétences complémentaires (Cloud, DevOps, BI...)
+- kpis: 3 chiffres clés percutants (ex: "50M+ événements/jour", "12 pipelines migrés", "3 clouds maîtrisés")
+- experiences: TOUTES les expériences avec 4-5 missions détaillées chacune, stack technique, résultats mesurables
+- formations: liste des diplômes et certifications
+- langues: langues avec niveau
+- tjm_suggest: TJM précis entre 500-900euro adapté à l offre
+- soft_skills: 4 soft skills pertinents pour ce poste
+
+JSON EXACT:
+{{"title_adapted":"<titre adapté>","accroche":"<3-4 phrases percutantes>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":["<c1>","<c2>","<c3>","<c4>","<c5>","<c6>"],"competences_secondaires":["<c1>","<c2>","<c3>","<c4>","<c5>"],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre exact>","context":"<contexte mission en 1 phrase>","missions":["<mission détaillée avec impact>","<mission détaillée>","<mission détaillée>","<mission>"],"stack":"<tech1, tech2, tech3>"}}],"formations":[{{"diplome":"<titre>","ecole":"<école>","annee":"<année>"}}],"certifications":["<cert1>","<cert2>"],"langues":[{{"langue":"<langue>","niveau":"<niveau>"}}],"soft_skills":["<skill1>","<skill2>","<skill3>","<skill4>"],"tjm_suggest":"<TJM>€/j"}}
+JSON seul, aucun texte autour.""", 1800)
+
+    # FIX-C : génération PDF async (await obligatoire — coroutine)
+    pdf_bytes = await generate_cv_pdf(cv, title)
     pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
 
     email_body = await ask(f"""Tu es Sekouna KABA, Data Engineer Senior freelance.
@@ -629,39 +1014,70 @@ UNIQUEMENT le texte.""", 500)
 
     subject      = f"Candidature freelance — {cv.get('title_adapted', title)}"
     followup_at  = (datetime.now() + timedelta(days=FOLLOWUP_DAYS)).isoformat()
-    status       = "sent" if AUTO_APPLY_ENABLED else "pending"
-    # FIX-D : applied_at renseigné si statut = sent
-    applied_at   = datetime.now().isoformat() if status == "sent" else None
+    status       = "pending"   # toujours pending — envoi déclenché par validation humaine
+    applied_at   = None
 
     with db_conn() as conn:
         cur = db_insert(
             conn,
-            "INSERT INTO auto_applications(offer_id,offer_title,match_score,tjm_negotiate,email_subject,email_body,cv_pdf_b64,status,applied_at,followup_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (offer_id, title, analysis.get("match_score"), analysis.get("tjm_negotiate",""),
+            "INSERT INTO auto_applications(offer_id,offer_title,company_email,match_score,tjm_negotiate,email_subject,email_body,cv_pdf_b64,status,applied_at,followup_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (offer_id, title, company_email,
+             analysis.get("match_score"), analysis.get("tjm_negotiate",""),
              subject, email_body, pdf_b64, status, applied_at, followup_at),
         )
         app_id = cur.lastrowid
-    log_act("🤖", f"Auto-apply: {title} ({analysis.get('match_score')}%) {status}", "agent")
+    log_act("draft", f"Candidature préparée: {title} ({analysis.get('match_score')}%)", "agent")
+    # pdf_bytes non retourné (bytes non sérialisables en JSON) — stocké en DB via pdf_b64
     return {"app_id": app_id, "status": status, "subject": subject, "followup_at": followup_at,
-            "cv": cv, "pdf_bytes": pdf_bytes, "pdf_b64": pdf_b64, "cv_pdf_generated": bool(pdf_bytes), "email_body": email_body}
+            "cv": cv, "cv_pdf_generated": bool(pdf_bytes), "email_body": email_body}
 
 async def run_followups():
+    """Envoie les emails de relance pour les candidatures sans réponse."""
     now = datetime.now().isoformat()
     with db_conn() as conn:
         due = db_exec(
             conn,
-            "SELECT id,offer_title FROM auto_applications WHERE status='sent' AND followup_sent=0 AND followup_at<=? AND reply_received=0",
+            "SELECT id,offer_title,company_email,email_body,tjm_negotiate FROM auto_applications WHERE status='sent' AND followup_sent=0 AND followup_at<=? AND reply_received=0",
             (now,),
         ).fetchall()
-    for app_id, title in due:
+    sent_count = 0
+    for row in due:
+        app_id, title, company_email, orig_body, tjm = row
         try:
-            await ask(f"Sekouna KABA freelance. Relance candidature {title}. 60 mots max, naturel. UNIQUEMENT le texte.", 300)
-            with db_conn() as conn:
-                db_exec(conn, "UPDATE auto_applications SET followup_sent=1 WHERE id=?", (app_id,))
-            log_act("🔄", f"Relance: {title}", "agent")
+            # Générer le texte de relance via IA
+            followup_text = await ask(
+                f"Tu es Sekouna KABA, Data Architect freelance. "
+                f"Écris un email de relance court (50-70 mots) pour la candidature: {title}. "
+                f"TJM proposé: {tjm or '760€/j'}. "
+                f"Ton naturel, direct, rappelle la candidature initiale, propose un échange rapide. "
+                f"UNIQUEMENT le texte de l'email.", 400)
+
+            subject  = f"Re: Candidature freelance — {title}"
+            body_html = make_html_email(followup_text)
+
+            # Envoyer seulement si on a l'adresse email
+            if company_email and EMAIL_PROVIDER != "none":
+                try:
+                    await send_email(company_email, "", subject, body_html, followup_text)
+                    with db_conn() as conn:
+                        db_exec(conn,
+                            "UPDATE auto_applications SET followup_sent=1 WHERE id=?",
+                            (app_id,))
+                    log_act("relance", f"Relance envoyée: {title} → {company_email}", "agent")
+                    sent_count += 1
+                except Exception as e:
+                    logger.error(f"Followup send {app_id}: {e}")
+            else:
+                # Pas d'email — on marque quand même pour ne pas re-tenter
+                with db_conn() as conn:
+                    db_exec(conn,
+                        "UPDATE auto_applications SET followup_sent=1 WHERE id=?",
+                        (app_id,))
+                log_act("relance", f"Relance générée (pas d'email configuré): {title}", "agent")
+                sent_count += 1
         except Exception as e:
             logger.error(f"Followup {app_id}: {e}")
-    return {"followups_sent": len(due)}
+    return {"followups_checked": len(due), "followups_sent": sent_count}
 
 # ══════════════════════════════════════════════════════
 #  NEGOCIATEUR ENGINE
@@ -686,7 +1102,7 @@ JSON seul.""", 1200)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("=" * 60)
-    logger.info("DataLinkedAI v3.0 — Démarrage")
+    logger.info("DataLinkedAI v5.0 — Démarrage")
     logger.info(f"  IA        : {AI_PROVIDER} / {AI_MODEL or 'non configuré'}")
     logger.info(f"  DB        : {'PostgreSQL Supabase' if USE_POSTGRES else 'SQLite /tmp (non persistant)'}")
     logger.info(f"  Email     : {EMAIL_PROVIDER}")
@@ -708,9 +1124,9 @@ async def lifespan(app: FastAPI):
     logger.info("DataLinkedAI arrêté proprement.")
 
 app = FastAPI(
-    title="DataLinkedAI API v3.0",
+    title="DataLinkedAI API v5.0",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
-    version="3.0.0",
+    version="5.0.0",
     lifespan=lifespan,
     dependencies=[Depends(verify_api_key)],
 )
@@ -731,7 +1147,7 @@ async def dashboard_ui():
 @app.get("/health", tags=["Système"])
 async def health():
     return {
-        "status": "ok", "version": "3.0.0",
+        "status": "ok", "version": "5.0.0",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
@@ -742,11 +1158,11 @@ async def health():
     }
 
 @app.get("/api/profile", tags=["Système"])
-async def profile():
+async def profile(_=Depends(verify_api_key)):
     return PROFILE
 
 @app.get("/api/dashboard", tags=["Système"])
-async def dashboard():
+async def dashboard(_=Depends(verify_api_key)):
     with db_conn() as conn:
         def cnt(q, p=()):
             return db_exec(conn, q, p).fetchone()[0]
@@ -775,9 +1191,18 @@ async def dashboard():
 # ── Offres ───────────────────────────────────────────
 class OfferReq(BaseModel):
     text: str
+    
+    class Config:
+        json_schema_extra = {"example": {"text": "Description de l'offre..."}}
+    
+    def __init__(self, **data):
+        if 'text' in data and len(data['text']) > 8000:
+            data['text'] = data['text'][:8000]
+        super().__init__(**data)
 
 @app.post("/api/offers/analyze", tags=["Offres Freelance"])
-async def analyze_offer(req: OfferReq):
+async def analyze_offer(request: Request, req: OfferReq, _=Depends(verify_api_key)):
+    _check_rate(request, "analyze_offer", 20, 3600)
     r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect, TJM 500-900euro.
 Profil:{json.dumps(PROFILE)}\nOffre:---{req.text}---
 JSON:{{"match_score":<0-100>,"title":"<titre>","tjm_range":"<fourchette>","tjm_negotiate":"<TJM 500-900euro>",
@@ -795,15 +1220,17 @@ JSON seul.""", 1200)
     return r
 
 @app.get("/api/offers", tags=["Offres Freelance"])
-async def list_offers():
+async def list_offers(limit: int = 50, offset: int = 0, _=Depends(verify_api_key)):
     with db_conn() as conn:
-        rows = db_exec(
+        total = db_exec(conn, "SELECT COUNT(*) FROM offers").fetchone()[0]
+        rows  = db_exec(
             conn,
-            "SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at FROM offers ORDER BY created_at DESC LIMIT 30",
+            f"SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at FROM offers ORDER BY created_at DESC LIMIT {min(limit,200)} OFFSET {offset}",
         ).fetchall()
-    return [{"id": r[0], "title": r[1], "source": r[2], "match_score": r[3],
+    return {"total": total, "offset": offset, "limit": limit,
+            "items": [{"id": r[0], "title": r[1], "source": r[2], "match_score": r[3],
              "tjm_negotiate": r[4], "urgency": r[5], "status": r[6],
-             "url": r[7], "created_at": str(r[8])} for r in rows]
+             "url": r[7], "created_at": str(r[8])} for r in rows]}
 
 # ── CV ───────────────────────────────────────────────
 class CVReq(BaseModel):
@@ -811,7 +1238,9 @@ class CVReq(BaseModel):
     generate_pdf: bool = True
 
 @app.post("/api/cv/adapt", tags=["CV Adaptatif"])
-async def adapt_cv(req: CVReq):
+async def adapt_cv(req: CVReq, request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "adapt_cv", 20, 3600)
+    _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 fois/heure
     r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect, TJM 500-900euro.
 CV:{json.dumps(PROFILE)}\nOffre:---{req.offer_text}---
 JSON:{{"score":<0-100>,"title_adapted":"<titre>","accroche":"<3 phrases 1ere personne>",
@@ -820,7 +1249,7 @@ JSON:{{"score":<0-100>,"title_adapted":"<titre>","accroche":"<3 phrases 1ere per
 "cover_letter":"<3 paragraphes directs>","strengths":["<f1>","<f2>","<f3>"],
 "advice":"<conseil 2 phrases>","tjm_suggest":"<TJM 500-900euro et pourquoi>"}}
 Max 5 experiences triees pertinence. JSON seul.""", 1800)
-    pdf_bytes = generate_cv_pdf(r, r.get("title_adapted","")) if req.generate_pdf else b""
+    pdf_bytes = await generate_cv_pdf(r, r.get("title_adapted","")) if req.generate_pdf else b""
     pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
     with db_conn() as conn:
         db_exec(conn,
@@ -831,7 +1260,7 @@ Max 5 experiences triees pertinence. JSON seul.""", 1800)
     return {**r, "cv_pdf_generated": bool(pdf_bytes), "pdf_size_kb": round(len(pdf_bytes)/1024,1) if pdf_bytes else 0}
 
 @app.get("/api/cv/history", tags=["CV Adaptatif"])
-async def cv_history():
+async def cv_history(_=Depends(verify_api_key)):
     with db_conn() as conn:
         rows = db_exec(
             conn,
@@ -848,11 +1277,33 @@ class PostReq(BaseModel):
     angle: str = ""
 
 @app.post("/api/linkedin/generate", tags=["LinkedIn Studio"])
-async def gen_post(req: PostReq):
-    content = await ask(f"""Tu es Sekouna KABA, Data Engineer Senior/Architect freelance.{json.dumps(PROFILE)}
-Post LinkedIn francais. Sujet:{req.topic}. Format:{req.format}. Ton:{req.tone}.{f' Angle:{req.angle}' if req.angle else ''}
-1ere personne, missions reelles (SACEM/Thales/Accor), hook ligne1, 150-220 mots, 3-5 emojis, 5-7 hashtags fin.
-UNIQUEMENT le texte du post.""", 800)
+async def gen_post(req: PostReq, request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "gen_post", 20, 3600)
+    _rate_limit(request, max_calls=20, window_seconds=3600)  # 20 fois/heure
+    content = await ask(f"""Tu es Sekouna KABA, Data Architect/Engineer Senior freelance.
+Missions récentes : SACEM (Data Architect), Thales Group (Senior Data Engineer), Accor (Data Platform).
+{json.dumps(PROFILE)}
+
+Ecris un post LinkedIn VIRAL en français.
+Sujet: {req.topic}
+Format demandé: {req.format}
+Ton: {req.tone}
+{f'Angle spécifique: {req.angle}' if req.angle else ''}
+
+STRUCTURE VIRALE OBLIGATOIRE:
+— Ligne 1 : hook IRRÉSISTIBLE (max 12 mots) qui force le clic "voir plus"
+  Types de hooks qui marchent: chiffre choc, question provocatrice, confession, prise de position tranchée
+  Ex: "J'ai failli rater une mission à 850€/j à cause de ça."
+— Ligne 2 : vide
+— Corps : histoire concrète avec tes missions réelles + métriques précises (volumétrie, durée, impact)
+  Sauts de ligne fréquents — 1-2 phrases par paragraphe max
+— Fin : question qui APPELLE les commentaires ("Et vous, vous faites comment ?") OU CTA fort
+— 4-6 emojis positionnés stratégiquement (pas en début de chaque phrase)
+— 6-8 hashtags pertinents en toute fin sur une ligne
+— 200-260 mots au total
+
+TON: expert accessible, direct, authentique — pas corporate, pas lisse
+UNIQUEMENT le texte du post, rien d'autre.""", 1000)
     with db_conn() as conn:
         db_exec(conn,
             "INSERT INTO linkedin_posts(topic,format,tone,content) VALUES(?,?,?,?)",
@@ -861,7 +1312,7 @@ UNIQUEMENT le texte du post.""", 800)
     return {"content": content.strip()}
 
 @app.get("/api/linkedin/posts", tags=["LinkedIn Studio"])
-async def list_posts():
+async def list_posts(_=Depends(verify_api_key)):
     with db_conn() as conn:
         rows = db_exec(
             conn,
@@ -875,7 +1326,8 @@ class ProspectReq(BaseModel):
     target_context: str
 
 @app.post("/api/prospecting/generate", tags=["Prospection"])
-async def gen_prospect(req: ProspectReq):
+async def gen_prospect(request: Request, req: ProspectReq, _=Depends(verify_api_key)):
+    _check_rate(request, "gen_prospect", 15, 3600)
     r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect freelance.{json.dumps(PROFILE)}
 Contexte:{req.target_context}
 JSON:{{"targets":[{{"role":"<role>","why":"<raison>","msg":"<message connexion 280 chars>"}}],
@@ -890,7 +1342,8 @@ class TJMReq(BaseModel):
     context: str = ""
 
 @app.post("/api/tjm/analyze", tags=["TJM Optimizer"])
-async def analyze_tjm(req: TJMReq):
+async def analyze_tjm(request: Request, req: TJMReq, _=Depends(verify_api_key)):
+    _check_rate(request, "analyze_tjm", 15, 3600)
     r = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior freelance. TJM 500-900euro.{json.dumps(PROFILE)}
 Contexte:{req.context or "Mission generale Data Engineer Senior/Architect full remote"}
 JSON:{{"tjm_market":<median>,"tjm_top":<top>,"tjm_recommend":<500-900>,"summary":"<2 phrases>",
@@ -906,7 +1359,9 @@ class ProposalReq(BaseModel):
     brief: str
 
 @app.post("/api/proposal/generate", tags=["Proposition Client"])
-async def gen_proposal(req: ProposalReq):
+async def gen_proposal(req: ProposalReq, request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "gen_proposal", 15, 3600)
+    _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 fois/heure
     r = await ask_json(f"""Sekouna KABA Data Architect/Engineer freelance. TJM 500-900euro.{json.dumps(PROFILE)}
 Brief:{req.brief}
 JSON:{{"title":"<titre>","exec_summary":"<3 phrases>","problem":"<2 phrases>","solution":"<3 para>",
@@ -918,7 +1373,8 @@ JSON seul.""", 1600)
 
 # ── Audit ────────────────────────────────────────────
 @app.post("/api/audit/profile", tags=["Audit Profil"])
-async def audit_profile():
+async def audit_profile(request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "audit_profile", 10, 3600)
     r = await ask_json(f"""Audit profil LinkedIn Sekouna KABA freelance.{json.dumps(PROFILE)}
 JSON:{{"score":<0-100>,"seo":<0-100>,
 "sections":[{{"name":"<section>","score":<0-100>,"status":"<OK/A ameliorer/Critique>","advice":"<conseil>"}}],
@@ -946,7 +1402,8 @@ class ContactReq(BaseModel):
     name: str; email: str; company: str; role: str; source: str = "manuel"; notes: str = ""
 
 @app.post("/api/email/compose", tags=["Email Prospection"])
-async def compose_email(req: EmailComposeReq):
+async def compose_email(request: Request, req: EmailComposeReq, _=Depends(verify_api_key)):
+    _check_rate(request, "compose_email", 30, 3600)
     result = await ask_json(f"""Tu es Sekouna KABA, Data Engineer Senior/Architect freelance.{json.dumps(PROFILE)}
 Email prospection B2B pour: {req.to_name}, {req.role} chez {req.company}.
 Contexte: {req.context or "entreprise tech/data"}. Ton: {req.tone}.
@@ -972,7 +1429,7 @@ JSON seul.""", 1000)
             "status": "draft — POST /api/email/send pour envoyer"}
 
 @app.post("/api/email/send", tags=["Email Prospection"])
-async def send_email_ep(req: EmailSendReq):
+async def send_email_ep(req: EmailSendReq, _=Depends(verify_api_key)):
     if not req.confirm:
         raise HTTPException(400, "confirm=true requis")
     with db_conn() as conn:
@@ -1014,7 +1471,8 @@ async def send_email_ep(req: EmailSendReq):
             "subject": subject, "provider": EMAIL_PROVIDER}
 
 @app.post("/api/email/campaign", tags=["Email Prospection"])
-async def email_campaign(req: EmailBatchReq):
+async def email_campaign(request: Request, req: EmailBatchReq, _=Depends(verify_api_key)):
+    _check_rate(request, "email_campaign", 5, 3600)
     if len(req.contacts) > 20:
         raise HTTPException(400, "Max 20 contacts par campagne")
     results = []
@@ -1042,7 +1500,7 @@ async def email_campaign(req: EmailBatchReq):
             "draft": len(req.contacts)-total, "results": results}
 
 @app.patch("/api/email/{email_id}/replied", tags=["Email Prospection"])
-async def mark_email_replied(email_id: int):
+async def mark_email_replied(email_id: int, _=Depends(verify_api_key)):
     _rnow = datetime.now().isoformat()   # FIX: Python datetime compatible SQLite+PG
     with db_conn() as conn:
         db_exec(conn,
@@ -1051,7 +1509,7 @@ async def mark_email_replied(email_id: int):
     return {"email_id": email_id, "status": "replied"}
 
 @app.get("/api/email/history", tags=["Email Prospection"])
-async def email_history(status: Optional[str] = None, limit: int = 50):
+async def email_history(status: Optional[str] = None, limit: int = 50, offset: int = 0, _=Depends(verify_api_key)):
     with db_conn() as conn:
         if status:
             rows = db_exec(conn,
@@ -1066,7 +1524,7 @@ async def email_history(status: Optional[str] = None, limit: int = 50):
              "replied_at": str(r[8]), "created_at": str(r[9])} for r in rows]
 
 @app.get("/api/email/stats", tags=["Email Prospection"])
-async def email_stats():
+async def email_stats(_=Depends(verify_api_key)):
     with db_conn() as conn:
         def cnt(q, p=()):
             return db_exec(conn, q, p).fetchone()[0]
@@ -1083,7 +1541,7 @@ async def email_stats():
             "provider": EMAIL_PROVIDER}
 
 @app.post("/api/email/contacts", tags=["Email Prospection"])
-async def add_contact(req: ContactReq):
+async def add_contact(req: ContactReq, _=Depends(verify_api_key)):
     with db_conn() as conn:
         cur = db_insert(conn,
             "INSERT INTO email_contacts(name,email,company,role,source,notes) VALUES(?,?,?,?,?,?)",
@@ -1092,7 +1550,7 @@ async def add_contact(req: ContactReq):
     return {"contact_id": cid, "status": "added"}
 
 @app.get("/api/email/contacts", tags=["Email Prospection"])
-async def list_contacts():
+async def list_contacts(_=Depends(verify_api_key)):
     with db_conn() as conn:
         rows = db_exec(
             conn,
@@ -1106,17 +1564,19 @@ async def list_contacts():
 # ══════════════════════════════════════════════════════
 
 @app.post("/api/copilot/run", tags=["Copilot Quotidien"])
-async def trigger_copilot(bt: BackgroundTasks):
+async def trigger_copilot(bt: BackgroundTasks, _=Depends(verify_api_key)):
     bt.add_task(run_copilot)
     return {"status": "started", "mode": "apify" if APIFY_TOKEN else "mock",
             "message": "Le copilot tourne en arrière-plan. Vérifie /api/copilot/history dans 60s."}
 
 @app.post("/api/copilot/run/sync", tags=["Copilot Quotidien"])
-async def trigger_copilot_sync():
+async def trigger_copilot_sync(request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "trigger_copilot_sync", 3, 3600)
+    _rate_limit(request, max_calls=3, window_seconds=3600)  # 3 fois/heure max
     return await run_copilot()
 
 @app.get("/api/copilot/history", tags=["Copilot Quotidien"])
-async def copilot_history():
+async def copilot_history(_=Depends(verify_api_key)):
     with db_conn() as conn:
         rows = db_exec(
             conn,
@@ -1127,7 +1587,7 @@ async def copilot_history():
              "auto_applied": r[6], "run_at": str(r[7])} for r in rows]
 
 @app.get("/api/copilot/config", tags=["Copilot Quotidien"])
-async def copilot_config():
+async def copilot_config(_=Depends(verify_api_key)):
     return {"copilot_email": COPILOT_EMAIL, "hour": COPILOT_HOUR,
             "auto_apply": AUTO_APPLY_ENABLED, "min_score": AUTO_APPLY_MIN_SCORE,
             "followup_days": FOLLOWUP_DAYS,
@@ -1143,7 +1603,9 @@ class AutoApplyReq(BaseModel):
     description: str; force_send: bool = False
 
 @app.post("/api/agent/apply", tags=["Agent Candidature Auto"])
-async def agent_apply(req: AutoApplyReq):
+async def agent_apply(req: AutoApplyReq, request: Request, _=Depends(verify_api_key)):
+    _check_rate(request, "agent_apply", 20, 3600)
+    _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 candidatures/heure
     analysis = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior. TJM 500-900euro.
 {json.dumps(PROFILE)}\nOffre: {req.description}
 JSON:{{"match_score":<0-100>,"tjm_negotiate":"<TJM 500-900euro>",
@@ -1153,15 +1615,22 @@ JSON seul.""", 500)
     if score < 60:
         return {"match_score": score, "decision": "Score trop faible (<60%) — pas de candidature générée",
                 "analysis": analysis}
-    # FIX: cree un offer_id reel (jamais 0)
-    _oc = get_db()
-    _ocur = db_insert(_oc, "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status) VALUES(?,?,?,?,?,?,?)",
-        (req.offer_title,"manual",req.description[:1000],score,analysis.get("tjm_negotiate",""),analysis.get("urgency",""),"analyzed"))
-    offer_id = _ocur.lastrowid; _oc.commit(); _oc.close()
-    result = await run_auto_apply(offer_id, req.offer_title, req.company, req.description, analysis)
+    # FIX: cree un offer_id reel via context manager (jamais 0)
+    with db_conn() as _oc:
+        _ocur = db_insert(_oc, "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status) VALUES(?,?,?,?,?,?,?)",
+            (req.offer_title,"manual",req.description[:1000],score,analysis.get("tjm_negotiate",""),analysis.get("urgency",""),"analyzed"))
+        offer_id = _ocur.lastrowid
+    result = await run_auto_apply(offer_id, req.offer_title, req.company, req.description, analysis, req.company_email or "")
     if (AUTO_APPLY_ENABLED or req.force_send) and req.company_email:
-        # FIX: pdf_bytes directement depuis result (pas result.cv.cv_pdf_b64)
-        pdf_bytes = result.get("pdf_bytes") or b""
+        # pdf_bytes récupéré depuis la DB (result ne contient plus de bytes bruts)
+        _pdf_b64 = result.get("pdf_b64") or ""
+        try:
+            with db_conn() as _pc:
+                _pr = db_exec(_pc, "SELECT cv_pdf_b64 FROM auto_applications WHERE id=?", (result["app_id"],)).fetchone()
+                _pdf_b64 = _pr[0] if _pr and _pr[0] else _pdf_b64
+        except Exception:
+            pass
+        pdf_bytes = base64.b64decode(_pdf_b64) if _pdf_b64 else b""
         body_html = make_html_email(result.get("email_body", ""))
         att_name  = f"CV_Sekouna_KABA_{req.offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
         # ── Envoi isolé du update DB ──
@@ -1185,8 +1654,29 @@ JSON seul.""", 500)
                 logger.error(f"agent_apply DB update failed (email was sent): {db_err}")
     return {**analysis, **result, "auto_apply_active": AUTO_APPLY_ENABLED or req.force_send}
 
+
+@app.get("/api/agent/applications/export-csv", tags=["Agent Candidature Auto"])
+async def export_applications_csv(_=Depends(verify_api_key)):
+    """Exporte toutes les candidatures en CSV."""
+    import csv, io as _io
+    with db_conn() as conn:
+        rows = db_exec(conn,
+            "SELECT id,offer_title,company_email,match_score,tjm_negotiate,status,applied_at,followup_at,followup_sent,reply_received,created_at FROM auto_applications ORDER BY created_at DESC"
+        ).fetchall()
+    out = _io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["id","poste","email_entreprise","score","tjm","statut","date_candidature","date_relance","relance_envoyée","reponse_recue","creé_le"])
+    for r in rows:
+        w.writerow(r)
+    from fastapi.responses import Response
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=candidatures.csv"}
+    )
+
 @app.get("/api/agent/applications", tags=["Agent Candidature Auto"])
-async def list_applications(status: Optional[str] = None):
+async def list_applications(status: Optional[str] = None, _=Depends(verify_api_key)):
     with db_conn() as conn:
         q = "SELECT id,offer_title,company_email,match_score,tjm_negotiate,email_subject,status,applied_at,followup_at,followup_sent,reply_received,created_at FROM auto_applications"
         if status:
@@ -1198,7 +1688,7 @@ async def list_applications(status: Optional[str] = None):
     return [dict(zip(cols, r)) for r in rows]
 
 @app.patch("/api/agent/applications/{app_id}/replied", tags=["Agent Candidature Auto"])
-async def mark_replied_app(app_id: int):
+async def mark_replied_app(app_id: int, _=Depends(verify_api_key)):
     with db_conn() as conn:
         db_exec(conn,
             "UPDATE auto_applications SET reply_received=1, status='replied' WHERE id=?",
@@ -1207,7 +1697,7 @@ async def mark_replied_app(app_id: int):
     return {"app_id": app_id, "status": "replied"}
 
 @app.get("/api/agent/stats", tags=["Agent Candidature Auto"])
-async def agent_stats():
+async def agent_stats(_=Depends(verify_api_key)):
     with db_conn() as conn:
         def cnt(q, p=()):
             return db_exec(conn, q, p).fetchone()[0]
@@ -1227,7 +1717,8 @@ class NegotiationReq(BaseModel):
     context: str; current_offer: str; target_tjm: str = "760euro/j"; conversation: str = ""
 
 @app.post("/api/negotiate", tags=["Négociateur TJM"])
-async def negotiate(req: NegotiationReq):
+async def negotiate(request: Request, req: NegotiationReq, _=Depends(verify_api_key)):
+    _check_rate(request, "negotiate", 20, 3600)
     ctx    = req.context + (f"\n\nConversation:\n{req.conversation}" if req.conversation else "")
     result = await run_negotiation(ctx, req.current_offer, req.target_tjm)
     with db_conn() as conn:
@@ -1239,8 +1730,93 @@ async def negotiate(req: NegotiationReq):
     log_act("💰", f"{req.current_offer} → {result.get('counter_offer','?')} (confiance {result.get('confidence_score','?')}%)", "negotiate")
     return result
 
+# ══════════════════════════════════════════════════════
+#  VALIDATION (Human-in-the-Loop)
+# ══════════════════════════════════════════════════════
+
+@app.get("/api/approvals", tags=["Validation"])
+async def list_approvals(status: Optional[str] = "pending", _=Depends(verify_api_key)):
+    with db_conn() as conn:
+        if status == "all":
+            rows = db_exec(conn, "SELECT id,type,title,preview,payload,status,approved_at,created_at FROM pending_approvals ORDER BY created_at DESC").fetchall()
+        else:
+            rows = db_exec(conn, "SELECT id,type,title,preview,payload,status,approved_at,created_at FROM pending_approvals WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
+    return [{"id":r[0],"type":r[1],"title":r[2],"preview":r[3],
+             "payload":json.loads(r[4]) if r[4] else {},
+             "status":r[5],"approved_at":r[6],"created_at":r[7]} for r in rows]
+
+@app.post("/api/approvals/{approval_id}/approve", tags=["Validation"])
+async def approve_item(approval_id: int, _=Depends(verify_api_key)):
+    with db_conn() as conn:
+        row = db_exec(conn, "SELECT type,title,payload,status FROM pending_approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Approbation introuvable")
+    if row[3] != "pending":
+        raise HTTPException(400, f"Deja traite: {row[3]}")
+    item_type = row[0]
+    payload   = json.loads(row[2]) if row[2] else {}
+    result    = {}
+    try:
+        if item_type == "linkedin_post":
+            with db_conn() as conn:
+                db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (payload.get("content",""),))
+            log_act("checkmark", f"Post LinkedIn valide: {payload.get('topic','')}", "validation")
+            result = {"action": "post_published", "topic": payload.get("topic")}
+        elif item_type == "candidature":
+            app_id     = payload.get("app_id")
+            company    = payload.get("company", "Recruteur")
+            subject    = payload.get("subject", "Candidature freelance")
+            email_body = payload.get("email_body", "")
+            with db_conn() as conn:
+                app_row = db_exec(conn, "SELECT cv_pdf_b64,company_email FROM auto_applications WHERE id=?", (app_id,)).fetchone()
+            if app_row and app_row[1] and EMAIL_PROVIDER != "none":
+                pdf_bytes = base64.b64decode(app_row[0]) if app_row[0] else b""
+                offer_title = payload.get("offer_title", "")
+                att_name = f"CV_Sekouna_KABA_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+                try:
+                    await send_email(app_row[1], company, subject, make_html_email(email_body), email_body,
+                                     att_bytes=pdf_bytes or None, att_name=att_name)
+                    with db_conn() as conn:
+                        db_exec(conn, "UPDATE auto_applications SET status='sent', applied_at=CURRENT_TIMESTAMP WHERE id=?", (app_id,))
+                    log_act("send", f"Candidature envoyee: {offer_title}", "validation")
+                    result = {"action": "email_sent", "to": app_row[1], "subject": subject}
+                    await notify("📨 Candidature envoyée", f"{offer_title}\nDest: {app_row[1]}\n{subject}", url=DASHBOARD_URL)
+                except Exception as e:
+                    raise HTTPException(500, f"Erreur envoi email: {e}")
+            else:
+                with db_conn() as conn:
+                    db_exec(conn, "UPDATE auto_applications SET status='approved' WHERE id=?", (app_id,))
+                log_act("check", f"Candidature approuvee sans email: {payload.get('offer_title','')}", "validation")
+                result = {"action": "approved_no_email"}
+        with db_conn() as conn:
+            db_exec(conn, "UPDATE pending_approvals SET status='approved', approved_at=CURRENT_TIMESTAMP WHERE id=?", (approval_id,))
+        return {"status": "approved", "type": item_type, **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erreur approbation: {e}")
+
+@app.post("/api/approvals/{approval_id}/reject", tags=["Validation"])
+async def reject_item(approval_id: int, _=Depends(verify_api_key)):
+    with db_conn() as conn:
+        row = db_exec(conn, "SELECT type,title FROM pending_approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Approbation introuvable")
+    with db_conn() as conn:
+        db_exec(conn, "UPDATE pending_approvals SET status='rejected' WHERE id=?", (approval_id,))
+    log_act("x", f"Rejete: {row[1]}", "validation")
+    return {"status": "rejected", "type": row[0], "title": row[1]}
+
+@app.get("/api/approvals/stats", tags=["Validation"])
+async def approval_stats(_=Depends(verify_api_key)):
+    with db_conn() as conn:
+        pending  = db_exec(conn, "SELECT COUNT(*) FROM pending_approvals WHERE status='pending'").fetchone()[0]
+        approved = db_exec(conn, "SELECT COUNT(*) FROM pending_approvals WHERE status='approved'").fetchone()[0]
+        rejected = db_exec(conn, "SELECT COUNT(*) FROM pending_approvals WHERE status='rejected'").fetchone()[0]
+    return {"pending": pending, "approved": approved, "rejected": rejected}
+
 @app.get("/api/negotiate/history", tags=["Négociateur TJM"])
-async def negotiate_history():
+async def negotiate_history(_=Depends(verify_api_key)):
     with db_conn() as conn:
         rows = db_exec(
             conn,
@@ -1251,10 +1827,340 @@ async def negotiate_history():
              "created_at": str(r[6])} for r in rows]
 
 @app.patch("/api/negotiate/{neg_id}/outcome", tags=["Négociateur TJM"])
-async def set_outcome(neg_id: int, outcome: str):
+async def set_outcome(neg_id: int, outcome: str, _=Depends(verify_api_key)):
     with db_conn() as conn:
         db_exec(conn, "UPDATE negotiations SET outcome=? WHERE id=?", (outcome, neg_id))
     return {"neg_id": neg_id, "outcome": outcome}
+
+
+# ══════════════════════════════════════════════════════
+#  ANALYTICS FREELANCE
+# ══════════════════════════════════════════════════════
+
+@app.get("/api/analytics", tags=["Analytics"])
+async def analytics(_=Depends(verify_api_key)):
+    """Tableau de bord analytique complet — performance, tendances, ROI."""
+    with db_conn() as conn:
+        def cnt(q, p=()):  return db_exec(conn,q,p).fetchone()[0]
+        def rows(q, p=()): return db_exec(conn,q,p).fetchall()
+
+        # ── Candidatures ──────────────────────────────────────────────
+        total_apps   = cnt("SELECT COUNT(*) FROM auto_applications")
+        sent_apps    = cnt("SELECT COUNT(*) FROM auto_applications WHERE status='sent'")
+        replied_apps = cnt("SELECT COUNT(*) FROM auto_applications WHERE reply_received=1")
+        reply_rate   = round(replied_apps / sent_apps * 100, 1) if sent_apps > 0 else 0
+
+        # Taux par score IA
+        score_brackets = []
+        for lo, hi, label in [(85,100,"85-100%"),(70,85,"70-84%"),(60,70,"60-69%")]:
+            t = cnt(f"SELECT COUNT(*) FROM auto_applications WHERE match_score>={lo} AND match_score<{hi}")
+            r = cnt(f"SELECT COUNT(*) FROM auto_applications WHERE match_score>={lo} AND match_score<{hi} AND reply_received=1")
+            score_brackets.append({"range": label, "total": t, "replied": r,
+                                    "rate": round(r/t*100,1) if t > 0 else 0})
+
+        # Performance par source
+        sources_raw = rows("""
+            SELECT o.source, COUNT(a.id) as apps,
+                   SUM(CASE WHEN a.reply_received=1 THEN 1 ELSE 0 END) as replies
+            FROM auto_applications a
+            JOIN offers o ON a.offer_id = o.id
+            GROUP BY o.source ORDER BY apps DESC LIMIT 8
+        """)
+        sources = [{"source": r[0] or "Inconnu", "apps": r[1],
+                    "replies": r[2], "rate": round(r[2]/r[1]*100,1) if r[1]>0 else 0}
+                   for r in sources_raw]
+
+        # TJM moyen proposé vs marché
+        tjm_rows = rows("SELECT tjm_negotiate FROM auto_applications WHERE tjm_negotiate IS NOT NULL AND tjm_negotiate != '' LIMIT 50")
+        tjm_vals = []
+        import re as _re
+        for (t,) in tjm_rows:
+            m = _re.search(r'(\d{3,4})', str(t))
+            if m: tjm_vals.append(int(m.group(1)))
+        tjm_avg     = round(sum(tjm_vals)/len(tjm_vals)) if tjm_vals else 0
+        tjm_min     = min(tjm_vals) if tjm_vals else 0
+        tjm_max     = max(tjm_vals) if tjm_vals else 0
+
+        # ── LinkedIn ──────────────────────────────────────────────────
+        total_posts     = cnt("SELECT COUNT(*) FROM linkedin_posts")
+        published_posts = cnt("SELECT COUNT(*) FROM linkedin_posts WHERE status='published'")
+
+        # Top sujets LinkedIn
+        topics_raw = rows("""
+            SELECT topic, COUNT(*) as cnt FROM linkedin_posts
+            GROUP BY topic ORDER BY cnt DESC LIMIT 6
+        """)
+        top_topics = [{"topic": r[0], "count": r[1]} for r in topics_raw]
+
+        # ── Emails ────────────────────────────────────────────────────
+        emails_sent    = cnt("SELECT COUNT(*) FROM emails WHERE status='sent'")
+        emails_replied = cnt("SELECT COUNT(*) FROM emails WHERE replied=1")
+        email_rate     = round(emails_replied/emails_sent*100,1) if emails_sent>0 else 0
+
+        # ── Offres ────────────────────────────────────────────────────
+        total_offers  = cnt("SELECT COUNT(*) FROM offers")
+        avg_score     = db_exec(conn,"SELECT AVG(match_score) FROM offers WHERE match_score IS NOT NULL").fetchone()[0]
+        avg_score     = round(avg_score, 1) if avg_score else 0
+        high_match    = cnt("SELECT COUNT(*) FROM offers WHERE match_score >= 85")
+        mid_match     = cnt("SELECT COUNT(*) FROM offers WHERE match_score >= 70 AND match_score < 85")
+
+        # Évolution hebdomadaire (4 dernières semaines)
+        weekly_raw = rows("""
+            SELECT strftime('%Y-W%W', created_at) as week,
+                   COUNT(*) as offers,
+                   AVG(match_score) as avg_score
+            FROM offers
+            WHERE created_at >= datetime('now', '-28 days')
+            GROUP BY week ORDER BY week
+        """) if not USE_POSTGRES else rows("""
+            SELECT TO_CHAR(created_at, 'IYYY-IW') as week,
+                   COUNT(*) as offers,
+                   AVG(match_score) as avg_score
+            FROM offers
+            WHERE created_at >= NOW() - INTERVAL '28 days'
+            GROUP BY week ORDER BY week
+        """)
+        weekly = [{"week": r[0], "offers": r[1], "avg_score": round(r[2],1) if r[2] else 0}
+                  for r in weekly_raw]
+
+        # ── Copilot ───────────────────────────────────────────────────
+        copilot_runs   = cnt("SELECT COUNT(*) FROM copilot_runs")
+        digests_sent   = cnt("SELECT COUNT(*) FROM copilot_runs WHERE digest_sent=1")
+        auto_applied_t = cnt("SELECT SUM(auto_applied) FROM copilot_runs") or 0
+
+        # ── Validation ────────────────────────────────────────────────
+        v_pending  = cnt("SELECT COUNT(*) FROM pending_approvals WHERE status='pending'")
+        v_approved = cnt("SELECT COUNT(*) FROM pending_approvals WHERE status='approved'")
+        v_rejected = cnt("SELECT COUNT(*) FROM pending_approvals WHERE status='rejected'")
+        v_rate     = round(v_approved/(v_approved+v_rejected)*100,1) if (v_approved+v_rejected)>0 else 0
+
+        # ── Délai moyen de réponse ────────────────────────────────────
+        # (approximation basée sur followup_at - created_at)
+        delay_raw = db_exec(conn,"""
+            SELECT AVG(
+                CAST(julianday(COALESCE(followup_at, datetime('now'))) -
+                     julianday(created_at) AS REAL)
+            ) FROM auto_applications WHERE reply_received=1
+        """).fetchone()[0] if not USE_POSTGRES else None
+        avg_reply_delay = round(delay_raw, 1) if delay_raw else None
+
+    return {
+        "candidatures": {
+            "total": total_apps, "sent": sent_apps, "replied": replied_apps,
+            "reply_rate_pct": reply_rate, "by_score": score_brackets,
+            "by_source": sources, "avg_reply_delay_days": avg_reply_delay,
+        },
+        "tjm": {
+            "avg_proposed": tjm_avg, "min": tjm_min, "max": tjm_max,
+            "target": PROFILE["tjm_target"], "current": PROFILE["tjm_current"],
+            "gap_to_target": PROFILE["tjm_target"] - tjm_avg if tjm_avg else 0,
+        },
+        "linkedin": {
+            "total": total_posts, "published": published_posts,
+            "top_topics": top_topics,
+        },
+        "emails": {
+            "sent": emails_sent, "replied": emails_replied, "reply_rate_pct": email_rate,
+        },
+        "offers": {
+            "total": total_offers, "avg_score": avg_score,
+            "high_match": high_match, "mid_match": mid_match, "weekly": weekly,
+        },
+        "copilot": {
+            "runs": copilot_runs, "digests_sent": digests_sent,
+            "auto_applied_total": int(auto_applied_t),
+        },
+        "validation": {
+            "pending": v_pending, "approved": v_approved,
+            "rejected": v_rejected, "approval_rate_pct": v_rate,
+        },
+    }
+
+# ══════════════════════════════════════════════════════
+#  MONITORING ENDPOINTS
+# ══════════════════════════════════════════════════════
+
+@app.get("/api/rate-limit/status", tags=["Système"])
+async def rate_limit_status(request: Request, _=Depends(verify_api_key)):
+    """Voir ton quota d'appels restants par IP."""
+    ip  = request.client.host if request.client else "unknown"
+    now = time.time()
+    LIMITS = {
+        "copilot/run/sync": (3, 3600), "cv/adapt": (10, 3600),
+        "linkedin/generate": (20, 3600), "agent/apply": (10, 3600),
+        "proposal/generate": (10, 3600),
+    }
+    calls = len([t for t in _rate_store.get(ip, []) if now - t < 3600])
+    return {"ip": ip, "calls_last_hour": calls,
+            "limits": {k: {"max": v[0], "window_seconds": v[1]} for k, v in LIMITS.items()}}
+
+@app.delete("/api/rate-limit/reset", tags=["Système"])
+async def rate_limit_reset(request: Request, _=Depends(verify_api_key)):
+    """Réinitialise le compteur de rate limiting (admin uniquement)."""
+    ip = request.client.host if request.client else "unknown"
+    _rate_store.pop(ip, None)
+    return {"status": "reset", "ip": ip}
+
+
+# ══════════════════════════════════════════════════════
+#  PAGE PROFIL PUBLIQUE
+# ══════════════════════════════════════════════════════
+
+@app.get("/profil", include_in_schema=False)
+async def public_profile():
+    """Page profil publique — à partager aux recruteurs."""
+    from fastapi.responses import HTMLResponse
+    skills_html = "".join(f'<span class="skill-tag">{s}</span>' for s in PROFILE["skills"])
+    exp_html = ""
+    for e in PROFILE["experiences"]:
+        stack_tags = "".join(f'<span class="stack-tag">{t.strip()}</span>'
+                              for t in e.get("stack","").split(",") if t.strip())[:6*60]
+        exp_html += f"""
+        <div class="exp-card">
+          <div class="exp-header">
+            <div>
+              <div class="exp-company">{e['company']}</div>
+              <div class="exp-role">{e['role']}</div>
+            </div>
+            <div class="exp-period">{e['period']}</div>
+          </div>
+          <div class="stack-tags">{stack_tags}</div>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta property="og:title" content="Sekouna KABA — Data Architect Freelance">
+<meta property="og:description" content="Data Architect / Engineer Senior • TJM 500-900€/j • Remote">
+<meta property="og:type" content="profile">
+<title>Sekouna KABA — Data Architect Freelance</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Instrument Sans',sans-serif;background:#F4F6FB;color:#0C1630;min-height:100vh}}
+  .hero{{background:linear-gradient(135deg,#1A3A6B 0%,#2563EB 60%,#7C3AED 100%);padding:4rem 2rem 6rem;text-align:center;position:relative;overflow:hidden}}
+  .hero::before{{content:'';position:absolute;inset:0;background:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")}}
+  .avatar{{width:96px;height:96px;border-radius:50%;background:linear-gradient(135deg,#93C5FD,#7C3AED);display:flex;align-items:center;justify-content:center;font-family:'Bricolage Grotesque',sans-serif;font-size:2.2rem;font-weight:800;color:white;margin:0 auto 1.5rem;border:3px solid rgba(255,255,255,.3)}}
+  .hero h1{{font-family:'Bricolage Grotesque',sans-serif;font-size:clamp(2rem,5vw,3rem);font-weight:800;color:white;margin-bottom:.5rem}}
+  .hero .subtitle{{font-size:1.1rem;color:rgba(255,255,255,.85);margin-bottom:1.5rem}}
+  .hero .badges{{display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;margin-bottom:2rem}}
+  .hero .badge{{background:rgba(255,255,255,.15);backdrop-filter:blur(8px);color:white;padding:.4rem 1rem;border-radius:20px;font-size:.85rem;border:1px solid rgba(255,255,255,.25)}}
+  .hero .badge.gold{{background:rgba(245,158,11,.25);border-color:rgba(245,158,11,.5);color:#FDE68A}}
+  .cta-bar{{background:white;max-width:680px;margin:-2.5rem auto 0;border-radius:16px;padding:1.5rem 2rem;box-shadow:0 20px 60px rgba(0,0,0,.12);display:flex;gap:1rem;align-items:center;flex-wrap:wrap;justify-content:center;position:relative;z-index:10}}
+  .cta-btn{{padding:.75rem 1.75rem;border-radius:8px;font-weight:600;text-decoration:none;font-size:.95rem;transition:.2s}}
+  .cta-primary{{background:linear-gradient(135deg,#2563EB,#7C3AED);color:white}}
+  .cta-secondary{{background:#F4F6FB;color:#0C1630;border:1px solid #DDE3F0}}
+  .cta-btn:hover{{opacity:.88;transform:translateY(-1px)}}
+  .container{{max-width:900px;margin:0 auto;padding:4rem 2rem}}
+  .section{{margin-bottom:3.5rem}}
+  .section-title{{font-family:'Bricolage Grotesque',sans-serif;font-size:1.5rem;font-weight:700;color:#0C1630;margin-bottom:1.5rem;padding-bottom:.75rem;border-bottom:2px solid #EEF2FF}}
+  .kpi-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin-bottom:2rem}}
+  .kpi-card{{background:white;border-radius:12px;padding:1.25rem;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.06)}}
+  .kpi-val{{font-family:'Bricolage Grotesque',sans-serif;font-size:2rem;font-weight:800;background:linear-gradient(135deg,#2563EB,#7C3AED);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+  .kpi-label{{font-size:.78rem;color:#7B8DB5;margin-top:.25rem;text-transform:uppercase;letter-spacing:.5px}}
+  .skills-grid{{display:flex;flex-wrap:wrap;gap:.6rem}}
+  .skill-tag{{background:white;border:1px solid #DDE3F0;color:#2563EB;padding:.4rem .9rem;border-radius:20px;font-size:.85rem;font-weight:500}}
+  .exp-card{{background:white;border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1rem;box-shadow:0 2px 12px rgba(0,0,0,.05);border-left:3px solid #2563EB}}
+  .exp-header{{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:.75rem;flex-wrap:wrap}}
+  .exp-company{{font-family:'Bricolage Grotesque',sans-serif;font-weight:700;font-size:1.05rem}}
+  .exp-role{{color:#2563EB;font-size:.9rem;margin-top:.2rem}}
+  .exp-period{{color:#7B8DB5;font-size:.8rem;font-family:monospace;flex-shrink:0}}
+  .stack-tags{{display:flex;flex-wrap:wrap;gap:.4rem}}
+  .stack-tag{{background:#EEF2FF;color:#2563EB;padding:.2rem .6rem;border-radius:4px;font-size:.75rem;font-weight:500}}
+  .contact-card{{background:linear-gradient(135deg,#1A3A6B,#2563EB);border-radius:16px;padding:2.5rem;text-align:center;color:white}}
+  .contact-card h3{{font-family:'Bricolage Grotesque',sans-serif;font-size:1.6rem;font-weight:800;margin-bottom:.5rem}}
+  .contact-card p{{color:rgba(255,255,255,.8);margin-bottom:1.5rem}}
+  .contact-links{{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}}
+  .contact-link{{background:rgba(255,255,255,.15);color:white;padding:.65rem 1.5rem;border-radius:8px;text-decoration:none;border:1px solid rgba(255,255,255,.25);font-weight:500}}
+  .contact-link:hover{{background:rgba(255,255,255,.25)}}
+  .avail-badge{{display:inline-flex;align-items:center;gap:.5rem;background:#ECFDF5;color:#059669;padding:.5rem 1.25rem;border-radius:20px;font-weight:600;font-size:.9rem;border:1px solid #A7F3D0}}
+  .avail-dot{{width:8px;height:8px;background:#10B981;border-radius:50%;animation:pulse 2s infinite}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+  footer{{text-align:center;padding:2rem;color:#7B8DB5;font-size:.8rem;border-top:1px solid #EEF2FF}}
+  @media(max-width:600px){{.cta-bar{{flex-direction:column}}.exp-header{{flex-direction:column}}}}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="avatar">SK</div>
+  <h1>Sekouna KABA</h1>
+  <p class="subtitle">Data Architect &amp; Engineer Senior · Freelance</p>
+  <div class="badges">
+    <span class="badge gold">TJM 500–900€/j</span>
+    <span class="badge">🌍 Full Remote</span>
+    <span class="badge">📍 Île-de-France</span>
+    <span class="badge">8 ans d'expérience</span>
+  </div>
+  <div style="display:flex;justify-content:center">
+    <span class="avail-badge"><span class="avail-dot"></span>Disponible pour missions</span>
+  </div>
+</div>
+
+<div class="cta-bar">
+  <a href="mailto:kaba.sekouna@gmail.com" class="cta-btn cta-primary">📧 Me contacter</a>
+  <a href="https://linkedin.com/in/sekouna-kaba" class="cta-btn cta-secondary" target="_blank">LinkedIn</a>
+  <a href="https://github.com/cheick-sk" class="cta-btn cta-secondary" target="_blank">GitHub</a>
+</div>
+
+<div class="container">
+
+  <div class="section">
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-val">8+</div><div class="kpi-label">Années d'expérience</div></div>
+      <div class="kpi-card"><div class="kpi-val">3</div><div class="kpi-label">Clouds maîtrisés</div></div>
+      <div class="kpi-card"><div class="kpi-val">5+</div><div class="kpi-label">Missions grands comptes</div></div>
+      <div class="kpi-card"><div class="kpi-val">760€</div><div class="kpi-label">TJM cible</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">À propos</div>
+    <p style="line-height:1.8;color:#2D3C60;font-size:1rem">
+      Data Architect & Engineer Senior avec 8 ans d'expérience sur des projets à fort enjeu pour
+      <strong>SACEM, Thales Group, Accor</strong> et d'autres grands comptes.
+      Spécialisé dans la conception d'architectures data modernes (Medallion, Lakehouse, Data Mesh),
+      la migration de legacy systems, et les pipelines temps réel haute volumétrie.
+      Expert certifié <strong>Snowflake, AWS et GCP</strong>.
+      Full Remote · Disponible immédiatement.
+    </p>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Stack technique</div>
+    <div class="skills-grid">{skills_html}</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Expériences récentes</div>
+    {exp_html}
+  </div>
+
+  <div class="section">
+    <div class="section-title">Formation & Certifications</div>
+    <div style="display:flex;flex-wrap:wrap;gap:.75rem">
+      <div class="skill-tag" style="background:white">🎓 Master Informatique / Data Engineering</div>
+      <div class="skill-tag" style="background:white">☁️ AWS Certified</div>
+      <div class="skill-tag" style="background:white">☁️ GCP Professional Data Engineer</div>
+      <div class="skill-tag" style="background:white">❄️ Snowflake SnowPro Core</div>
+    </div>
+  </div>
+
+  <div class="contact-card">
+    <h3>Discutons de votre projet</h3>
+    <p>Disponible pour missions freelance à partir de maintenant · Remote ou Île-de-France</p>
+    <div class="contact-links">
+      <a href="mailto:kaba.sekouna@gmail.com" class="contact-link">📧 kaba.sekouna@gmail.com</a>
+      <a href="tel:+33659022157" class="contact-link">📱 +33 06 59 02 21 57</a>
+    </div>
+  </div>
+
+</div>
+<footer>Sekouna KABA · Data Architect & Engineer Senior Freelance · Powered by DataLinkedAI</footer>
+</body></html>"""
+    return HTMLResponse(content=html)
 
 # ══════════════════════════════════════════════════════
 #  LANDING PAGE

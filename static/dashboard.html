@@ -197,6 +197,8 @@ textarea{min-height:90px}
     <button class="nav-item" onclick="go('proposal')"><span class="ico">📑</span> Propositions</button>
     <button class="nav-item" onclick="go('audit')"><span class="ico">🔍</span> Audit Profil</button>
     <div class="nav-section">Système</div>
+    <button class="nav-item" onclick="go('analytics')"><span class="ico">📈</span> Analytics</button>
+    <button class="nav-item" onclick="go('validation')" id="nav-validation"><span class="ico">✅</span> Validation <span id="validation-badge" style="display:none;background:#EF4444;color:white;border-radius:10px;padding:1px 6px;font-size:.62rem;margin-left:auto;font-weight:700"></span></button>
     <button class="nav-item" onclick="go('config')"><span class="ico">⚙️</span> Configuration</button>
   </nav>
   <div class="sb-footer">
@@ -517,6 +519,77 @@ textarea{min-height:90px}
 </div>
 
 <!-- ══════════════════════════════════
+     PAGE: ANALYTICS
+════════════════════════════════════ -->
+<div id="page-analytics" class="page" style="display:none">
+  <div class="page-header">
+    <div><h1>📈 Analytics</h1><p>Performance complète de ta recherche de missions.</p></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadAnalytics()">🔄 Actualiser</button>
+  </div>
+
+  <!-- KPIs principaux -->
+  <div id="analytics-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin-bottom:1.5rem"></div>
+
+  <div class="two-col" style="gap:1.5rem">
+    <!-- Candidatures par score -->
+    <div class="card">
+      <h3>🎯 Taux de réponse par score IA</h3>
+      <div id="analytics-score-table"></div>
+    </div>
+    <!-- TJM -->
+    <div class="card">
+      <h3>💰 Analyse TJM</h3>
+      <div id="analytics-tjm"></div>
+    </div>
+  </div>
+
+  <div class="two-col" style="gap:1.5rem;margin-top:1.5rem">
+    <!-- Par source -->
+    <div class="card">
+      <h3>🌐 Performance par source</h3>
+      <div id="analytics-sources"></div>
+    </div>
+    <!-- LinkedIn -->
+    <div class="card">
+      <h3>💼 LinkedIn Studio</h3>
+      <div id="analytics-linkedin"></div>
+    </div>
+  </div>
+
+  <!-- Évolution hebdo -->
+  <div class="card" style="margin-top:1.5rem">
+    <h3>📅 Évolution hebdomadaire des offres</h3>
+    <div id="analytics-weekly" style="overflow-x:auto"></div>
+  </div>
+
+  <!-- Validation stats -->
+  <div class="card" style="margin-top:1.5rem">
+    <h3>✅ Statistiques de validation</h3>
+    <div id="analytics-validation"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     PAGE: VALIDATION
+════════════════════════════════════ -->
+<div id="page-validation" class="page" style="display:none">
+  <div class="page-header">
+    <div>
+      <h1>✅ Validation</h1>
+      <p>Le Copilot a tout préparé. Valide ou rejette chaque élément avant envoi.</p>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="loadValidation()">🔄 Actualiser</button>
+  </div>
+
+  <div id="validation-stats" style="display:flex;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap"></div>
+  <div id="validation-empty" style="display:none" class="empty">
+    <div class="emoji">✅</div>
+    <p>Aucun élément en attente — tout est validé !</p>
+  </div>
+  <div id="validation-list"></div>
+</div>
+
+<!-- ══════════════════════════════════
      PAGE: CONFIG
 ════════════════════════════════════ -->
 <div class="page" id="page-config">
@@ -594,6 +667,18 @@ Note: Plan gratuit = 5$/mois de crédits.
 </div><!-- end #main -->
 
 <!-- TOAST CONTAINER -->
+
+<!-- Modal Preview CV -->
+<div id="cv-preview-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;overflow-y:auto;padding:2rem">
+  <div style="background:white;max-width:700px;margin:0 auto;border-radius:16px;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:1.25rem 1.5rem;border-bottom:1px solid var(--blue-soft)">
+      <h3 style="font-family:var(--font-head)">👁 Aperçu avant envoi</h3>
+      <button onclick="document.getElementById('cv-preview-modal').style.display='none'" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim)">✕</button>
+    </div>
+    <div id="cv-preview-body" style="padding:1.5rem"></div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -635,7 +720,7 @@ async function api(method, path, body) {
 }
 
 // -- NAV -----------------------------------------------------------
-const titles = { home:'Dashboard', copilot:'🌅 Copilot Quotidien', offers:'📋 Offres Freelance', agent:'🤖 Agent Candidature', nego:'💰 Négociateur TJM', linkedin:'💼 LinkedIn Studio', email:'📧 Email Prospection', cv:'📄 CV Adaptatif', proposal:'📑 Propositions', audit:'🔍 Audit Profil', config:'⚙️ Configuration' };
+const titles = { home:'Dashboard', analytics:'📈 Analytics', validation:'✅ Validation', copilot:'🌅 Copilot Quotidien', offers:'📋 Offres Freelance', agent:'🤖 Agent Candidature', nego:'💰 Négociateur TJM', linkedin:'💼 LinkedIn Studio', email:'📧 Email Prospection', cv:'📄 CV Adaptatif', proposal:'📑 Propositions', audit:'🔍 Audit Profil', config:'⚙️ Configuration' };
 
 function go(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -652,6 +737,8 @@ function go(page) {
   if(page === 'email') loadEmailHistory();
   if(page === 'cv') loadCVHistory();
   if(page === 'config') checkHealth();
+  if(page === 'validation') loadValidation();
+  if(page === 'analytics') loadAnalytics();
 }
 
 function showTab(page, tab) {
@@ -1360,9 +1447,251 @@ function copyText(text) {
   navigator.clipboard.writeText(text).then(() => toast('Copié !', 'success'));
 }
 
+// -- ANALYTICS -------------------------------------------------------
+async function loadAnalytics() {
+  try {
+    const d = await api('GET', '/api/analytics');
+
+    // KPIs principaux
+    const c = d.candidatures, t = d.tjm, o = d.offers;
+    document.getElementById('analytics-kpis').innerHTML = `
+      <div class="stat-card"><div class="stat-label">CANDIDATURES</div><div class="stat-value">${c.total}</div></div>
+      <div class="stat-card"><div class="stat-label">TAUX REPONSE</div><div class="stat-value" style="color:var(--green)">${c.reply_rate_pct}%</div></div>
+      <div class="stat-card"><div class="stat-label">TJM MOYEN PROPOSÉ</div><div class="stat-value" style="color:var(--orange)">${t.avg_proposed ? t.avg_proposed + 'euro' : '--'}</div></div>
+      <div class="stat-card"><div class="stat-label">OFFRES ANALYSÉES</div><div class="stat-value">${o.total}</div></div>
+      <div class="stat-card"><div class="stat-label">SCORE MOYEN</div><div class="stat-value">${o.avg_score}%</div></div>
+      <div class="stat-card"><div class="stat-label">POSTS LINKEDIN</div><div class="stat-value">${d.linkedin.total}</div></div>
+    `;
+
+    // Score brackets
+    const sb = c.by_score || [];
+    document.getElementById('analytics-score-table').innerHTML = sb.length ?
+      '<table class="data-table"><thead><tr><th>Score IA</th><th>Candidatures</th><th>Réponses</th><th>Taux</th></tr></thead><tbody>' +
+      sb.map(s => `<tr>
+        <td><span class="badge ${s.rate>=30?'badge-green':s.rate>=15?'badge-amber':'badge-red'}">${s.range}</span></td>
+        <td>${s.total}</td><td>${s.replied}</td>
+        <td style="font-weight:700;color:${s.rate>=30?'var(--green)':s.rate>=15?'var(--orange)':'var(--dim)'}">${s.rate}%</td>
+      </tr>`).join('') + '</tbody></table>'
+      : '<p style="color:var(--dim);font-size:.85rem">Pas encore assez de données.</p>';
+
+    // TJM
+    const gap = t.gap_to_target;
+    document.getElementById('analytics-tjm').innerHTML = `
+      <div style="display:grid;gap:.75rem">
+        <div style="display:flex;justify-content:space-between;padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm)">
+          <span style="color:var(--dim);font-size:.85rem">TJM moyen proposé</span>
+          <strong>${t.avg_proposed ? t.avg_proposed + 'euro/j' : '--'}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm)">
+          <span style="color:var(--dim);font-size:.85rem">Fourchette</span>
+          <strong>${t.min ? t.min+'–'+t.max+'euro/j' : '--'}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.75rem;background:var(--blue-soft);border-radius:var(--radius-sm)">
+          <span style="color:var(--dim);font-size:.85rem">Cible</span>
+          <strong style="color:var(--green)">${t.target}euro/j</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.75rem;background:${gap<=0?'#ECFDF5':'#FFF7ED'};border-radius:var(--radius-sm)">
+          <span style="color:var(--dim);font-size:.85rem">Écart à la cible</span>
+          <strong style="color:${gap<=0?'var(--green)':'var(--orange)'}">${gap>0?'+'+gap+'euro/j a gagner':gap===0?'Objectif atteint':Math.abs(gap)+'euro/j au dessus'}</strong>
+        </div>
+      </div>`;
+
+    // Sources
+    const sources = c.by_source || [];
+    document.getElementById('analytics-sources').innerHTML = sources.length ?
+      '<table class="data-table"><thead><tr><th>Source</th><th>Candidatures</th><th>Réponses</th><th>Taux</th></tr></thead><tbody>' +
+      sources.map(s => `<tr><td>${s.source}</td><td>${s.apps}</td><td>${s.replies}</td>
+        <td><span class="badge ${s.rate>=20?'badge-green':'badge-amber'}">${s.rate}%</span></td></tr>`
+      ).join('') + '</tbody></table>'
+      : '<p style="color:var(--dim);font-size:.85rem">Pas encore de données.</p>';
+
+    // LinkedIn
+    const li = d.linkedin;
+    const topics = li.top_topics || [];
+    document.getElementById('analytics-linkedin').innerHTML = `
+      <div style="display:flex;gap:1rem;margin-bottom:1rem">
+        <div class="stat-card" style="flex:1"><div class="stat-label">TOTAL</div><div class="stat-value">${li.total}</div></div>
+        <div class="stat-card" style="flex:1"><div class="stat-label">PUBLIÉS</div><div class="stat-value" style="color:var(--green)">${li.published}</div></div>
+      </div>
+      ${topics.length ? '<div style="font-size:.78rem;color:var(--dim);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px">Top sujets</div>' +
+        topics.map(t => `<div style="display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid var(--blue-soft)">
+          <span style="font-size:.85rem">${t.topic}</span><span class="badge badge-blue">${t.count}</span></div>`
+        ).join('') : ''}`;
+
+    // Évolution hebdo
+    const weekly = o.weekly || [];
+    document.getElementById('analytics-weekly').innerHTML = weekly.length ?
+      '<table class="data-table"><thead><tr><th>Semaine</th><th>Offres</th><th>Score moyen</th><th>Tendance</th></tr></thead><tbody>' +
+      weekly.map((w, i) => {
+        const prev = i > 0 ? weekly[i-1].offers : w.offers;
+        const trend = w.offers > prev ? '↑' : w.offers < prev ? '↓' : '=';
+        const tc = w.offers > prev ? 'var(--green)' : w.offers < prev ? 'var(--red)' : 'var(--dim)';
+        return `<tr><td style="font-family:var(--font-mono);font-size:.78rem">${w.week}</td>
+          <td>${w.offers}</td>
+          <td><span class="badge ${w.avg_score>=80?'badge-green':w.avg_score>=65?'badge-amber':'badge-red'}">${w.avg_score}%</span></td>
+          <td style="color:${tc};font-size:1.1rem;font-weight:700">${trend}</td></tr>`;
+      }).join('') + '</tbody></table>'
+      : '<p style="color:var(--dim);font-size:.85rem;padding:.5rem 0">Pas encore de données hebdomadaires.</p>';
+
+    // Validation
+    const v = d.validation;
+    document.getElementById('analytics-validation').innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1rem">
+        <div class="stat-card"><div class="stat-label">EN ATTENTE</div><div class="stat-value" style="color:var(--orange)">${v.pending}</div></div>
+        <div class="stat-card"><div class="stat-label">APPROUVÉS</div><div class="stat-value" style="color:var(--green)">${v.approved}</div></div>
+        <div class="stat-card"><div class="stat-label">REJETÉS</div><div class="stat-value" style="color:var(--red)">${v.rejected}</div></div>
+        <div class="stat-card"><div class="stat-label">TAUX APPRO.</div><div class="stat-value">${v.approval_rate_pct}%</div></div>
+      </div>`;
+
+  } catch(e) { toast('Erreur analytics: ' + e.message, 'error'); }
+}
+
+// -- PREVIEW CV -------------------------------------------------------
+async function previewCV(appId) {
+  const modal = document.getElementById('cv-preview-modal');
+  const body  = document.getElementById('cv-preview-body');
+  body.innerHTML = '<div style="text-align:center;padding:2rem"><div class="spinner" style="margin:0 auto"></div><p style="margin-top:1rem;color:var(--dim)">Chargement...</p></div>';
+  modal.style.display = 'block';
+  try {
+    const apps = await api('GET', '/api/agent/applications');
+    const items = Array.isArray(apps) ? apps : (apps.items || []);
+    const app = items.find(a => a.id == appId);
+    if (!app) { body.innerHTML = '<p style="padding:1rem;color:var(--dim)">Candidature introuvable.</p>'; return; }
+
+    const emailId = clipStore(app.email_body || '');
+    body.innerHTML = `
+      <div style="margin-bottom:1.5rem">
+        <div style="display:flex;gap:.75rem;align-items:center;margin-bottom:1rem;flex-wrap:wrap">
+          <span class="badge badge-green">${app.match_score}% match</span>
+          <span style="font-size:.85rem;color:var(--dim)">${app.offer_title}</span>
+        </div>
+        <div style="background:var(--blue-soft);padding:1rem;border-radius:var(--radius-sm);margin-bottom:1rem">
+          <div style="font-size:.75rem;color:var(--dim);margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.5px">Objet de l email</div>
+          <div style="font-weight:600">${app.email_subject || '--'}</div>
+          <div style="font-size:.8rem;color:var(--dim);margin-top:.25rem">Destinataire: ${app.company_email || 'Non renseigné'}</div>
+        </div>
+        <div style="font-size:.75rem;color:var(--dim);margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.5px">Corps de l email</div>
+        <div style="background:white;border:1px solid var(--blue-soft);padding:1rem;border-radius:var(--radius-sm);font-size:.88rem;line-height:1.7;white-space:pre-wrap;max-height:200px;overflow-y:auto">${app.email_body || '--'}</div>
+        <button class="btn btn-secondary btn-sm" style="margin-top:.75rem" onclick="clipCopy('${emailId}')">📋 Copier l email</button>
+      </div>
+      <div>
+        <div style="font-size:.75rem;color:var(--dim);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px">CV PDF</div>
+        ${app.cv_pdf_b64 ? '<p style="color:var(--green);font-size:.88rem">✅ CV PDF généré et prêt à être envoyé en pièce jointe</p><p style="font-size:.78rem;color:var(--dim)">Le PDF sera automatiquement joint à l email lors de la validation.</p>' : '<p style="color:var(--dim);font-size:.85rem">Pas de PDF généré pour cette candidature.</p>'}
+      </div>`;
+  } catch(e) {
+    body.innerHTML = '<p style="padding:1rem;color:var(--red)">Erreur: ' + e.message + '</p>';
+  }
+}
+
+// -- VALIDATION ------------------------------------------------------
+async function loadValidation() {
+  try {
+    const [items, stats] = await Promise.all([
+      api('GET', '/api/approvals?status=pending'),
+      api('GET', '/api/approvals/stats')
+    ]);
+
+    // Badge dans la nav
+    const badge = document.getElementById('validation-badge');
+    if (stats.pending > 0) {
+      badge.textContent = stats.pending;
+      badge.style.display = 'inline';
+    } else {
+      badge.style.display = 'none';
+    }
+
+    // Stats bar
+    document.getElementById('validation-stats').innerHTML = `
+      <div class="stat-card"><div class="stat-label">EN ATTENTE</div><div class="stat-value" style="color:var(--orange)">${stats.pending}</div></div>
+      <div class="stat-card"><div class="stat-label">APPROUVES</div><div class="stat-value" style="color:var(--green)">${stats.approved}</div></div>
+      <div class="stat-card"><div class="stat-label">REJETES</div><div class="stat-value" style="color:var(--red)">${stats.rejected}</div></div>
+    `;
+
+    const list = document.getElementById('validation-list');
+    const empty = document.getElementById('validation-empty');
+
+    if (!items.length) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+
+    list.innerHTML = items.map(item => {
+      const isPost   = item.type === 'linkedin_post';
+      const isAppli  = item.type === 'candidature';
+      const icon     = isPost ? '💼' : '📨';
+      const color    = isPost ? 'var(--blue)' : 'var(--green)';
+      const score    = item.payload?.score ? `<span class="badge badge-green">${item.payload.score}%</span>` : '';
+      const company  = item.payload?.company ? `<span style="color:var(--dim);font-size:.75rem"> · ${item.payload.company}</span>` : '';
+
+      return `
+      <div class="card" style="margin-bottom:1rem;border-left:4px solid ${color}" id="approval-${item.id}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;flex-wrap:wrap">
+              <span style="font-size:1.1rem">${icon}</span>
+              <strong style="font-family:var(--font-head)">${item.title}</strong>
+              ${score}${company}
+            </div>
+            <div style="font-size:.78rem;color:var(--ink2);line-height:1.6;background:var(--blue-soft);padding:.6rem .8rem;border-radius:var(--radius-sm);white-space:pre-wrap;max-height:80px;overflow:hidden">${item.preview || ''}</div>
+            <div style="font-size:.68rem;color:var(--dim);margin-top:.4rem;font-family:var(--font-mono)">${fmtDate(item.created_at)}</div>
+            ${isAppli && item.payload && item.payload.app_id ? '<button class="btn btn-secondary btn-sm" style="margin-top:.5rem;width:fit-content" onclick="previewCV(' + item.payload.app_id + ')">👁 Aperçu CV &amp; Email</button>' : ''}
+          </div>
+          <div style="display:flex;flex-direction:column;gap:.5rem;flex-shrink:0">
+            <button class="btn btn-primary btn-sm" onclick="approveItem(${item.id})">✅ Valider et envoyer</button>
+            <button class="btn btn-secondary btn-sm" onclick="rejectItem(${item.id})">❌ Rejeter</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+  } catch(e) { toast('Erreur chargement validations: ' + e.message, 'error'); }
+}
+
+async function approveItem(id) {
+  const card = document.getElementById('approval-' + id);
+  if (card) { card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+  try {
+    const r = await api('POST', '/api/approvals/' + id + '/approve');
+    toast('Valide ! ' + (r.action === 'email_sent' ? 'Email envoye.' : 'Traite.'), 'success');
+    if (card) card.remove();
+    loadValidation();
+  } catch(e) {
+    if (card) { card.style.opacity = '1'; card.style.pointerEvents = ''; }
+    toast('Erreur: ' + e.message, 'error');
+  }
+}
+
+async function rejectItem(id) {
+  const card = document.getElementById('approval-' + id);
+  if (card) { card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+  try {
+    await api('POST', '/api/approvals/' + id + '/reject');
+    toast('Rejete.', '');
+    if (card) card.remove();
+    loadValidation();
+  } catch(e) {
+    if (card) { card.style.opacity = '1'; card.style.pointerEvents = ''; }
+    toast('Erreur: ' + e.message, 'error');
+  }
+}
+
+// Vérifier le badge validation au chargement
+async function checkValidationBadge() {
+  try {
+    const stats = await api('GET', '/api/approvals/stats');
+    const badge = document.getElementById('validation-badge');
+    if (badge && stats.pending > 0) {
+      badge.textContent = stats.pending;
+      badge.style.display = 'inline';
+    }
+  } catch(e) {}
+}
+
 // -- INIT ----------------------------------------------------------
 window.onload = () => {
-  if (API_BASE) { loadDashboard(); }
+  if (API_BASE) { loadDashboard(); checkValidationBadge(); }
   // Responsive
   if (window.innerWidth < 768) {
     document.getElementById('menu-btn').style.display = 'block';
