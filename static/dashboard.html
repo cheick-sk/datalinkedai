@@ -179,7 +179,7 @@ textarea{min-height:90px}
 <aside id="sidebar">
   <div class="sb-logo">
     <div class="sb-logo-mark">DL</div>
-    <div class="sb-logo-text">DataLinkedAI <span>v8.0 PROD</span></div>
+    <div class="sb-logo-text">DataLinkedAI <span>v10.0 PROD</span></div>
   </div>
   <nav>
     <div class="nav-section">Vue générale</div>
@@ -189,6 +189,7 @@ textarea{min-height:90px}
     <button class="nav-item" onclick="go('offers')"><span class="ico">📋</span> Offres Freelance</button>
     <button class="nav-item" onclick="go('agent')"><span class="ico">🤖</span> Agent Candidature</button>
     <button class="nav-item" onclick="go('nego')"><span class="ico">💰</span> Négociateur TJM</button>
+    <button class="nav-item" onclick="go('interview')"><span class="ico">🎤</span> Mock Interview</button>
     <div class="nav-section">Contenu & Réseau</div>
     <button class="nav-item" onclick="go('linkedin')"><span class="ico">💼</span> LinkedIn Studio</button>
     <button class="nav-item" onclick="go('email')"><span class="ico">📧</span> Email Prospection</button>
@@ -199,6 +200,7 @@ textarea{min-height:90px}
     <div class="nav-section">Système</div>
     <button class="nav-item" onclick="go('analytics')"><span class="ico">📈</span> Analytics</button>
     <button class="nav-item" onclick="go('validation')" id="nav-validation"><span class="ico">✅</span> Validation <span id="validation-badge" style="display:none;background:#EF4444;color:white;border-radius:10px;padding:1px 6px;font-size:.62rem;margin-left:auto;font-weight:700"></span></button>
+    <button class="nav-item" onclick="go('profile-edit')"><span class="ico">👤</span> Mon Profil</button>
     <button class="nav-item" onclick="go('config')"><span class="ico">⚙️</span> Configuration</button>
   </nav>
   <div class="sb-footer">
@@ -333,10 +335,42 @@ textarea{min-height:90px}
   <div class="section-header"><h2>🤖 Agent Candidature Auto</h2></div>
   <div class="tab-buttons">
     <button class="tab-btn active" onclick="showTab('agent','apply')">✉️ Postuler</button>
-    <button class="tab-btn" onclick="showTab('agent','apps')">📋 Candidatures</button>
-    <button class="tab-btn" onclick="showTab('agent','stats')">📊 Stats</button>
+    <button class="tab-btn" onclick="showTab('agent','apps');loadApps()">📋 Candidatures</button>
+    <button class="tab-btn" onclick="showTab('agent','stats');loadAgentStats()">📊 Stats</button>
   </div>
   <div class="tab-panel active" id="tab-agent-apply">
+    <!-- Sélecteur d'offre existante -->
+    <div class="card" style="margin-bottom:1rem">
+      <h3 style="margin-bottom:.75rem">📋 Charger depuis une offre analysée</h3>
+      <div style="display:flex;gap:.6rem;align-items:flex-end">
+        <div style="flex:1">
+          <label>Sélectionner une offre du Copilot ou de l'historique</label>
+          <select id="agent-offer-picker" style="width:100%;padding:.6rem .8rem;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:.83rem;color:var(--ink);background:var(--surface);outline:none">
+            <option value="">— Choisir une offre analysée —</option>
+          </select>
+        </div>
+        <button class="btn btn-secondary" onclick="loadAgentOfferPicker()" title="Rafraîchir la liste">🔄</button>
+        <button class="btn btn-primary" onclick="fillAgentFromPicker()">⬇️ Charger</button>
+      </div>
+      <!-- Preview de la description complète -->
+      <div id="agent-offer-preview" style="display:none;margin-top:.75rem;background:var(--bg);border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:.85rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">
+          <span id="agent-preview-title" style="font-family:var(--font-head);font-weight:700;font-size:.9rem"></span>
+          <div style="display:flex;gap:.4rem">
+            <span id="agent-preview-score" class="badge badge-green"></span>
+            <span id="agent-preview-tjm" class="badge badge-blue"></span>
+            <span id="agent-preview-urgency" class="badge badge-amber"></span>
+          </div>
+        </div>
+        <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.04em">Description complète de l'offre</div>
+        <div id="agent-preview-desc" style="font-size:.82rem;color:var(--ink2);line-height:1.65;max-height:220px;overflow-y:auto;white-space:pre-wrap;border-top:1px solid var(--border);padding-top:.5rem"></div>
+        <div style="margin-top:.6rem;display:flex;gap:.5rem">
+          <button class="btn btn-success btn-sm" onclick="confirmLoadOffer()">✅ Utiliser cette offre</button>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('agent-offer-preview').style.display='none'">✕ Fermer</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <h3>✉️ Postuler à une offre</h3>
       <div class="form-grid">
@@ -347,8 +381,11 @@ textarea{min-height:90px}
           <select id="agent-force"><option value="false">Non (garder en draft)</option><option value="true">Oui (envoyer maintenant)</option></select>
         </div>
       </div>
-      <div class="form-row"><label>Description complète de l'offre</label>
-        <textarea id="agent-desc" placeholder="Description détaillée de la mission..." rows="4"></textarea>
+      <div class="form-row">
+        <label>Description complète de l'offre
+          <span id="agent-desc-chars" style="font-weight:400;color:var(--dim);margin-left:.5rem">0 caractères</span>
+        </label>
+        <textarea id="agent-desc" placeholder="Colle ici la description complète de la mission (LinkedIn, Malt, Freelance.com...)&#10;&#10;Plus la description est détaillée, plus le CV et l'email seront adaptés précisément." rows="8" oninput="document.getElementById('agent-desc-chars').textContent=this.value.length+' caractères'"></textarea>
       </div>
       <button class="btn btn-primary" onclick="agentApply()">🚀 Générer candidature + CV PDF</button>
     </div>
@@ -686,6 +723,185 @@ Note: Plan gratuit = 5$/mois de crédits.
   </div>
 </div>
 
+<!-- ══════════════════════════════════
+     PAGE: MON PROFIL (Éditeur)
+════════════════════════════════════ -->
+<div class="page" id="page-profile-edit">
+  <div class="section-header">
+    <h2>👤 Mon Profil</h2>
+    <span class="desc">Configurable — utilisé par tous les modules IA</span>
+  </div>
+
+  <!-- Sélecteur de secteur -->
+  <div class="card" style="margin-bottom:1rem;background:linear-gradient(135deg,var(--blue-soft),var(--purple-soft));border-color:var(--blue)">
+    <h3>🏭 Secteur d'activité</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:.75rem">Choisir votre secteur adapte automatiquement les recherches d'offres, les sujets LinkedIn et le vocabulaire des prompts IA.</p>
+    <div id="sector-presets" style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.75rem"></div>
+    <div class="form-row" style="margin:0">
+      <label>Secteur personnalisé</label>
+      <input type="text" id="prof-sector" placeholder="Ex: Data & Tech, Marketing Digital, Ingénierie...">
+    </div>
+  </div>
+
+  <div class="two-col">
+    <!-- Identité -->
+    <div class="card">
+      <h3>🪪 Identité</h3>
+      <div class="form-grid">
+        <div class="form-row"><label>Nom complet</label><input type="text" id="prof-name" placeholder="Prénom NOM"></div>
+        <div class="form-row"><label>Titre professionnel</label><input type="text" id="prof-title" placeholder="Data Engineer Senior — Lead Tech"></div>
+        <div class="form-row"><label>Email</label><input type="email" id="prof-email" placeholder="prenom@email.com"></div>
+        <div class="form-row"><label>Téléphone</label><input type="text" id="prof-phone" placeholder="+33 6 00 00 00 00"></div>
+        <div class="form-row"><label>Localisation</label><input type="text" id="prof-location" placeholder="Paris, Île-de-France"></div>
+        <div class="form-row"><label>Années d'expérience</label><input type="number" id="prof-years" min="0" max="40" placeholder="8"></div>
+      </div>
+      <div class="form-row"><label>Bio / Accroche</label><textarea id="prof-bio" rows="3" placeholder="3-4 phrases qui résument votre valeur ajoutée..."></textarea></div>
+      <div class="form-grid">
+        <div class="form-row"><label>LinkedIn URL</label><input type="text" id="prof-linkedin" placeholder="https://linkedin.com/in/..."></div>
+        <div class="form-row"><label>GitHub / Portfolio</label><input type="text" id="prof-github" placeholder="https://github.com/..."></div>
+      </div>
+    </div>
+
+    <!-- TJM & Disponibilité -->
+    <div class="card">
+      <h3>💰 TJM & Disponibilité</h3>
+      <div class="form-row">
+        <label>Type de recherche</label>
+        <select id="prof-work-type">
+          <option value="freelance">Freelance / Missions</option>
+          <option value="salarie">Salarié / CDI-CDD</option>
+          <option value="both">Les deux</option>
+        </select>
+      </div>
+      <div class="form-grid">
+        <div class="form-row"><label>TJM minimum (€)</label><input type="number" id="prof-tjm-min" min="0" placeholder="500"></div>
+        <div class="form-row"><label>TJM maximum (€)</label><input type="number" id="prof-tjm-max" min="0" placeholder="900"></div>
+        <div class="form-row"><label>TJM actuel (€)</label><input type="number" id="prof-tjm-current" min="0" placeholder="650"></div>
+        <div class="form-row"><label>TJM cible (€)</label><input type="number" id="prof-tjm-target" min="0" placeholder="760"></div>
+      </div>
+      <div class="form-row"><label>Salaire min brut annuel (€) — si salarié</label><input type="number" id="prof-salary-min" min="0" placeholder="45000"></div>
+      <div class="form-row"><label>Disponibilité</label>
+        <select id="prof-availability">
+          <option value="Disponible">🟢 Disponible maintenant</option>
+          <option value="Disponible sous 1 mois">🟡 Disponible sous 1 mois</option>
+          <option value="Disponible sous 3 mois">🟠 Disponible sous 3 mois</option>
+          <option value="En mission">🔴 En mission (pas disponible)</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:1rem;margin-top:.5rem">
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:500;cursor:pointer">
+          <input type="checkbox" id="prof-remote"> Ouvert au remote
+        </label>
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:500;cursor:pointer">
+          <input type="checkbox" id="prof-relocation"> Mobilité géographique
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compétences -->
+  <div class="card">
+    <h3>🛠 Compétences clés</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:.75rem">Séparées par des virgules. Ces compétences sont utilisées pour scorer les offres et générer les CV.</p>
+    <textarea id="prof-skills" rows="3" placeholder="Snowflake, dbt Core, Apache Airflow, Python, AWS, Azure, GCP, Terraform..."></textarea>
+  </div>
+
+  <!-- Expériences -->
+  <div class="card">
+    <h3>💼 Expériences professionnelles</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:.75rem">Vos missions les plus récentes et pertinentes (5 max recommandé).</p>
+    <div id="exp-list"></div>
+    <button class="btn btn-secondary btn-sm" onclick="addExpRow()" style="margin-top:.5rem">+ Ajouter une expérience</button>
+  </div>
+
+  <!-- Formations & Certifications -->
+  <div class="two-col">
+    <div class="card">
+      <h3>🎓 Formation & Certifications</h3>
+      <div class="form-row"><label>Certifications (une par ligne)</label>
+        <textarea id="prof-certs" rows="4" placeholder="AWS Certified&#10;GCP Professional Data Engineer&#10;Snowflake SnowPro Core"></textarea>
+      </div>
+    </div>
+    <div class="card">
+      <h3>🌍 Langues</h3>
+      <div class="form-row"><label>Langues et niveaux (une par ligne: Langue — Niveau)</label>
+        <textarea id="prof-langs" rows="4" placeholder="Français — Natif&#10;Anglais — Courant&#10;Espagnol — Notions"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mots-clés scraping -->
+  <div class="card">
+    <h3>🔍 Mots-clés pour le scraping d'offres</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:.75rem">En plus des recherches du secteur, ces termes supplémentaires seront utilisés pour trouver vos offres. Séparés par des virgules.</p>
+    <input type="text" id="prof-keywords" placeholder="Ex: remote, CDI, Paris, Snowflake, FinTech...">
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" onclick="saveProfile()">💾 Sauvegarder le profil</button>
+    <button class="btn btn-secondary" onclick="loadProfileEdit()">🔄 Recharger depuis la DB</button>
+    <button class="btn btn-secondary" onclick="previewProfile()">👁 Aperçu JSON</button>
+  </div>
+  <div id="profile-save-output" style="margin-top:.75rem"></div>
+</div>
+
+<!-- ══════════════════════════════════
+     PAGE: MOCK INTERVIEW IA
+════════════════════════════════════ -->
+<div class="page" id="page-interview">
+  <div class="section-header">
+    <h2>🎤 Mock Interview IA</h2>
+    <span class="desc">Simule un entretien avec un recruteur IA adapté à votre profil et à l'offre</span>
+  </div>
+
+  <div class="two-col">
+    <!-- Démarrer un entretien -->
+    <div class="card">
+      <h3>▶ Nouvel entretien</h3>
+      <div class="form-row"><label>Titre du poste / Offre ciblée</label>
+        <input type="text" id="itv-offer-title" placeholder="Ex: Lead Data Engineer Snowflake, Développeur React Senior...">
+      </div>
+      <div class="form-row"><label>Description de l'offre (optionnel)</label>
+        <textarea id="itv-offer-desc" rows="3" placeholder="Colle ici la description de l'offre pour un entretien ultra-personnalisé..."></textarea>
+      </div>
+      <div class="form-row"><label>Niveau de difficulté</label>
+        <select id="itv-difficulty">
+          <option value="easy">🟢 Facile — Questions générales et motivationnelles</option>
+          <option value="medium" selected>🟡 Moyen — Technique + comportemental (recommandé)</option>
+          <option value="hard">🔴 Expert — Questions pointues + stress test</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="btn-itv-start" onclick="startInterview()">🎤 Démarrer l'entretien</button>
+    </div>
+
+    <!-- Sessions passées -->
+    <div class="card">
+      <h3>📋 Mes entretiens passés</h3>
+      <div id="interview-sessions-list"><div class="empty"><div class="emoji">🎤</div><p>Aucun entretien pour l'instant</p></div></div>
+    </div>
+  </div>
+
+  <!-- Zone de conversation -->
+  <div class="card" id="interview-chat-card" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+      <h3 id="interview-chat-title">🎤 Entretien en cours</h3>
+      <div style="display:flex;gap:.5rem;align-items:center">
+        <span id="interview-difficulty-badge" class="badge badge-blue"></span>
+        <button class="btn btn-secondary btn-sm" onclick="endInterview()">✕ Terminer</button>
+      </div>
+    </div>
+    <div id="interview-messages" style="max-height:480px;overflow-y:auto;margin-bottom:1rem;display:flex;flex-direction:column;gap:.75rem;padding-right:.25rem"></div>
+    <div id="interview-input-area" style="display:flex;gap:.5rem;align-items:flex-end">
+      <textarea id="itv-answer" rows="3" placeholder="Tapez votre réponse ici... (Entrée pour envoyer, Maj+Entrée pour nouvelle ligne)"
+        style="flex:1;resize:none" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAnswer()}"></textarea>
+      <button class="btn btn-primary" id="btn-itv-send" onclick="sendAnswer()" style="height:fit-content;padding:.6rem 1.2rem">
+        Envoyer ↵
+      </button>
+    </div>
+    <div id="interview-final-score" style="display:none;margin-top:1rem"></div>
+  </div>
+</div>
+
 </div><!-- end #main -->
 
 <!-- TOAST CONTAINER -->
@@ -742,18 +958,20 @@ async function api(method, path, body) {
 }
 
 // -- NAV -----------------------------------------------------------
-const titles = { home:'Dashboard', analytics:'📈 Analytics', validation:'✅ Validation', copilot:'🌅 Copilot Quotidien', offers:'📋 Offres Freelance', agent:'🤖 Agent Candidature', nego:'💰 Négociateur TJM', linkedin:'💼 LinkedIn Studio', email:'📧 Email Prospection', cv:'📄 CV Adaptatif', proposal:'📑 Propositions', audit:'🔍 Audit Profil', config:'⚙️ Configuration' };
+const titles = { home:'Dashboard', analytics:'📈 Analytics', validation:'✅ Validation', copilot:'🌅 Copilot Quotidien', offers:'📋 Offres Freelance', agent:'🤖 Agent Candidature', nego:'💰 Négociateur TJM', linkedin:'💼 LinkedIn Studio', email:'📧 Email Prospection', cv:'📄 CV Adaptatif', proposal:'📑 Propositions', audit:'🔍 Audit Profil', config:'⚙️ Configuration', interview:'🎤 Mock Interview IA', 'profile-edit':'👤 Mon Profil' };
 
 function go(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('page-'+page).classList.add('active');
-  document.querySelector(`[onclick="go('${page}')"]`).classList.add('active');
+  const pageEl = document.getElementById('page-'+page);
+  if (pageEl) pageEl.classList.add('active');
+  const navEl = document.querySelector(`[onclick="go('${page}')"]`);
+  if (navEl) navEl.classList.add('active');
   document.getElementById('tb-title').textContent = titles[page] || page;
   if(page === 'home') loadDashboard();
   if(page === 'copilot') { loadCopilotHistory(); loadCopilotConfig(); loadBackupList(); }
   if(page === 'offers') loadOffers();
-  if(page === 'agent' && document.getElementById('tab-agent-apps').classList.contains('active')) loadApps();
+  if(page === 'agent') { loadAgentOfferPicker(); if(document.getElementById('tab-agent-apps').classList.contains('active')) loadApps(); }
   if(page === 'nego') loadNegoHistory();
   if(page === 'linkedin') loadPosts();
   if(page === 'email') loadEmailHistory();
@@ -761,6 +979,8 @@ function go(page) {
   if(page === 'config') checkHealth();
   if(page === 'validation') loadValidation();
   if(page === 'analytics') loadAnalytics();
+  if(page === 'interview') loadInterviewSessions();
+  if(page === 'profile-edit') loadProfileEdit();
 }
 
 function showTab(page, tab) {
@@ -1140,9 +1360,309 @@ function prefillCV(text) {
   document.getElementById('cv-offer').value = text;
 }
 
+// ── AGENT OFFER PICKER ────────────────────────────────────────────
+let _agentOffers = []; // cache local
+
+async function loadAgentOfferPicker() {
+  try {
+    const res = await api('GET', '/api/offers');
+    // L'API retourne soit un tableau, soit {items:[...]}
+    _agentOffers = Array.isArray(res) ? res : (res.items || []);
+    const sel = document.getElementById('agent-offer-picker');
+    sel.innerHTML = '<option value="">— Choisir une offre analysée —</option>' +
+      _agentOffers.map((o, i) => {
+        const score = o.match_score || 0;
+        const emoji = score >= 85 ? '🟢' : score >= 65 ? '🟡' : '🔵';
+        return `<option value="${i}">${emoji} ${score}% · ${o.title || '–'} (${o.source || '–'})</option>`;
+      }).join('');
+  } catch(e) { toast('Impossible de charger les offres', 'error'); }
+}
+
+function fillAgentFromPicker() {
+  const sel = document.getElementById('agent-offer-picker');
+  const idx = sel.value;
+  if (idx === '') { toast('Sélectionne une offre dans la liste', 'error'); return; }
+  const o = _agentOffers[parseInt(idx)];
+  if (!o) return;
+
+  // Afficher la preview avec description complète
+  document.getElementById('agent-preview-title').textContent = o.title || '–';
+  const score = o.match_score || 0;
+  document.getElementById('agent-preview-score').textContent = score + '%';
+  document.getElementById('agent-preview-score').className = 'badge ' + (score>=85?'badge-green':score>=65?'badge-amber':'badge-blue');
+  document.getElementById('agent-preview-tjm').textContent = o.tjm_negotiate || '–';
+  document.getElementById('agent-preview-urgency').textContent = o.urgency || '–';
+  document.getElementById('agent-preview-desc').textContent = o.description || '(description non disponible)';
+  document.getElementById('agent-offer-preview').style.display = 'block';
+  document.getElementById('agent-offer-preview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function confirmLoadOffer() {
+  const sel = document.getElementById('agent-offer-picker');
+  const idx = sel.value;
+  if (idx === '') return;
+  const o = _agentOffers[parseInt(idx)];
+  if (!o) return;
+
+  document.getElementById('agent-title').value   = o.title || '';
+  document.getElementById('agent-company').value  = o.company || '';
+  document.getElementById('agent-email').value    = o.company_email || '';
+  const desc = o.description || '';
+  document.getElementById('agent-desc').value    = desc;
+  document.getElementById('agent-desc-chars').textContent = desc.length + ' caractères';
+  document.getElementById('agent-offer-preview').style.display = 'none';
+  // Scroll vers le formulaire
+  document.getElementById('agent-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  toast('Offre chargée · ' + (desc.length) + ' car. de description', 'success');
+}
+
+// ── ARCHITECTURE DIAGRAM BUILDER (LinkedIn) ────────────────────────
+const ARCH_DIAGRAMS = {
+  'Snowflake': {
+    label: 'Data Warehouse Snowflake',
+    svg: `<svg viewBox="0 0 480 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:480px;border-radius:10px">
+      <rect width="480" height="200" fill="#0C1630" rx="10"/>
+      <text x="240" y="22" text-anchor="middle" font-family="monospace" font-size="11" fill="#7B8DB5">ARCHITECTURE DATA WAREHOUSE — SNOWFLAKE</text>
+      <!-- Sources -->
+      <rect x="18" y="40" width="80" height="36" rx="6" fill="#1A56FF22" stroke="#1A56FF" stroke-width="1.2"/>
+      <text x="58" y="62" text-anchor="middle" font-family="monospace" font-size="9" fill="#A0AFCF">Sources</text>
+      <rect x="18" y="86" width="80" height="36" rx="6" fill="#1A56FF22" stroke="#1A56FF" stroke-width="1.2"/>
+      <text x="58" y="108" text-anchor="middle" font-family="monospace" font-size="9" fill="#A0AFCF">ERP / CRM</text>
+      <rect x="18" y="132" width="80" height="36" rx="6" fill="#1A56FF22" stroke="#1A56FF" stroke-width="1.2"/>
+      <text x="58" y="154" text-anchor="middle" font-family="monospace" font-size="9" fill="#A0AFCF">APIs</text>
+      <!-- Ingestion -->
+      <line x1="98" y1="100" x2="140" y2="100" stroke="#1A56FF" stroke-width="1.5" marker-end="url(#arr)"/>
+      <rect x="140" y="64" width="80" height="72" rx="6" fill="#7C3AED22" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="180" y="96" text-anchor="middle" font-family="monospace" font-size="9" fill="#C4B5FD">Fivetran</text>
+      <text x="180" y="110" text-anchor="middle" font-family="monospace" font-size="9" fill="#C4B5FD">/ Airbyte</text>
+      <!-- Snowflake -->
+      <line x1="220" y1="100" x2="262" y2="100" stroke="#7C3AED" stroke-width="1.5" marker-end="url(#arr2)"/>
+      <rect x="262" y="55" width="90" height="90" rx="8" fill="#29b6f622" stroke="#29b6f6" stroke-width="2"/>
+      <text x="307" y="88" text-anchor="middle" font-family="monospace" font-size="10" font-weight="bold" fill="#29b6f6">❄ Snowflake</text>
+      <text x="307" y="102" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">RAW → CLEAN</text>
+      <text x="307" y="114" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">→ GOLD (dbt)</text>
+      <!-- BI -->
+      <line x1="352" y1="100" x2="390" y2="100" stroke="#29b6f6" stroke-width="1.5" marker-end="url(#arr3)"/>
+      <rect x="390" y="70" width="72" height="60" rx="6" fill="#00B96B22" stroke="#00B96B" stroke-width="1.5"/>
+      <text x="426" y="97" text-anchor="middle" font-family="monospace" font-size="9" fill="#00B96B">Tableau</text>
+      <text x="426" y="111" text-anchor="middle" font-family="monospace" font-size="9" fill="#00B96B">/ Looker</text>
+      <!-- Arrows defs -->
+      <defs>
+        <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#1A56FF"/></marker>
+        <marker id="arr2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7C3AED"/></marker>
+        <marker id="arr3" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#29b6f6"/></marker>
+      </defs>
+      <text x="240" y="190" text-anchor="middle" font-family="monospace" font-size="8" fill="#4a5568">Schéma illustratif — @SekounaKABA | DataLinkedAI</text>
+    </svg>`
+  },
+  'Medallion Architecture': {
+    label: 'Architecture Medallion (Bronze/Silver/Gold)',
+    svg: `<svg viewBox="0 0 480 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:480px;border-radius:10px">
+      <rect width="480" height="200" fill="#0C1630" rx="10"/>
+      <text x="240" y="22" text-anchor="middle" font-family="monospace" font-size="11" fill="#7B8DB5">ARCHITECTURE MEDALLION — LAKEHOUSE</text>
+      <!-- Ingestion -->
+      <rect x="14" y="55" width="68" height="90" rx="6" fill="#1A56FF11" stroke="#1A56FF55" stroke-width="1"/>
+      <text x="48" y="80" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">Kafka</text>
+      <text x="48" y="94" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">Spark</text>
+      <text x="48" y="108" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">API</text>
+      <text x="48" y="135" text-anchor="middle" font-family="monospace" font-size="7" fill="#4a5568">SOURCES</text>
+      <!-- Bronze -->
+      <line x1="82" y1="100" x2="112" y2="100" stroke="#CD7F32" stroke-width="1.5" marker-end="url(#b)"/>
+      <rect x="112" y="52" width="82" height="96" rx="8" fill="#CD7F3222" stroke="#CD7F32" stroke-width="1.8"/>
+      <text x="153" y="82" text-anchor="middle" font-family="monospace" font-size="12" fill="#CD7F32">🥉</text>
+      <text x="153" y="98" text-anchor="middle" font-family="monospace" font-size="10" font-weight="bold" fill="#CD7F32">BRONZE</text>
+      <text x="153" y="112" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Raw ingestion</text>
+      <text x="153" y="124" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Delta Lake</text>
+      <!-- Silver -->
+      <line x1="194" y1="100" x2="224" y2="100" stroke="#C0C0C0" stroke-width="1.5" marker-end="url(#s)"/>
+      <rect x="224" y="52" width="82" height="96" rx="8" fill="#C0C0C022" stroke="#C0C0C0" stroke-width="1.8"/>
+      <text x="265" y="82" text-anchor="middle" font-family="monospace" font-size="12" fill="#C0C0C0">🥈</text>
+      <text x="265" y="98" text-anchor="middle" font-family="monospace" font-size="10" font-weight="bold" fill="#C0C0C0">SILVER</text>
+      <text x="265" y="112" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Cleaned</text>
+      <text x="265" y="124" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Validated</text>
+      <!-- Gold -->
+      <line x1="306" y1="100" x2="336" y2="100" stroke="#FFD700" stroke-width="1.5" marker-end="url(#g)"/>
+      <rect x="336" y="52" width="82" height="96" rx="8" fill="#FFD70022" stroke="#FFD700" stroke-width="1.8"/>
+      <text x="377" y="82" text-anchor="middle" font-family="monospace" font-size="12" fill="#FFD700">🥇</text>
+      <text x="377" y="98" text-anchor="middle" font-family="monospace" font-size="10" font-weight="bold" fill="#FFD700">GOLD</text>
+      <text x="377" y="112" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Business</text>
+      <text x="377" y="124" text-anchor="middle" font-family="monospace" font-size="8" fill="#A0AFCF">Aggregated</text>
+      <!-- BI endpoint -->
+      <line x1="418" y1="100" x2="448" y2="100" stroke="#00B96B" stroke-width="1.5" marker-end="url(#bi)"/>
+      <rect x="448" y="68" width="24" height="64" rx="4" fill="#00B96B22" stroke="#00B96B" stroke-width="1.2"/>
+      <text x="460" y="107" text-anchor="middle" font-family="monospace" font-size="7" fill="#00B96B">BI</text>
+      <defs>
+        <marker id="b" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#CD7F32"/></marker>
+        <marker id="s" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#C0C0C0"/></marker>
+        <marker id="g" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#FFD700"/></marker>
+        <marker id="bi" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#00B96B"/></marker>
+      </defs>
+      <text x="240" y="190" text-anchor="middle" font-family="monospace" font-size="8" fill="#4a5568">Schéma illustratif — @SekounaKABA | DataLinkedAI</text>
+    </svg>`
+  },
+  'Apache Airflow': {
+    label: 'Pipeline Orchestration — Airflow',
+    svg: `<svg viewBox="0 0 480 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:480px;border-radius:10px">
+      <rect width="480" height="200" fill="#0C1630" rx="10"/>
+      <text x="240" y="22" text-anchor="middle" font-family="monospace" font-size="11" fill="#7B8DB5">DATA PIPELINE — APACHE AIRFLOW DAG</text>
+      <!-- DAG nodes -->
+      <ellipse cx="60" cy="100" rx="44" ry="26" fill="#1A56FF22" stroke="#1A56FF" stroke-width="1.5"/>
+      <text x="60" y="97" text-anchor="middle" font-family="monospace" font-size="9" fill="#A0AFCF">extract_</text>
+      <text x="60" y="109" text-anchor="middle" font-family="monospace" font-size="9" fill="#A0AFCF">sources</text>
+      <line x1="104" y1="100" x2="138" y2="100" stroke="#1A56FF" stroke-width="1.5" marker-end="url(#a1)"/>
+      <ellipse cx="184" cy="100" rx="44" ry="26" fill="#7C3AED22" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="184" y="97" text-anchor="middle" font-family="monospace" font-size="9" fill="#C4B5FD">validate_</text>
+      <text x="184" y="109" text-anchor="middle" font-family="monospace" font-size="9" fill="#C4B5FD">schema</text>
+      <line x1="228" y1="100" x2="262" y2="100" stroke="#7C3AED" stroke-width="1.5" marker-end="url(#a2)"/>
+      <ellipse cx="308" cy="100" rx="44" ry="26" fill="#F59E0B22" stroke="#F59E0B" stroke-width="1.5"/>
+      <text x="308" y="97" text-anchor="middle" font-family="monospace" font-size="9" fill="#FCD34D">transform_</text>
+      <text x="308" y="109" text-anchor="middle" font-family="monospace" font-size="9" fill="#FCD34D">dbt_run</text>
+      <line x1="352" y1="100" x2="386" y2="100" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#a3)"/>
+      <ellipse cx="432" cy="100" rx="44" ry="26" fill="#00B96B22" stroke="#00B96B" stroke-width="1.5"/>
+      <text x="432" y="97" text-anchor="middle" font-family="monospace" font-size="9" fill="#00B96B">notify_</text>
+      <text x="432" y="109" text-anchor="middle" font-family="monospace" font-size="9" fill="#00B96B">success</text>
+      <!-- retry arc -->
+      <path d="M352 90 Q370 50 308 74" stroke="#E83B3B" stroke-width="1" fill="none" stroke-dasharray="4 2" marker-end="url(#a4)"/>
+      <text x="332" y="55" text-anchor="middle" font-family="monospace" font-size="8" fill="#E83B3B">retry</text>
+      <!-- Labels -->
+      <text x="60" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#4a5568">Task 1</text>
+      <text x="184" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#4a5568">Task 2</text>
+      <text x="308" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#4a5568">Task 3</text>
+      <text x="432" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#4a5568">Task 4</text>
+      <defs>
+        <marker id="a1" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#1A56FF"/></marker>
+        <marker id="a2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7C3AED"/></marker>
+        <marker id="a3" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#F59E0B"/></marker>
+        <marker id="a4" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#E83B3B"/></marker>
+      </defs>
+      <text x="240" y="190" text-anchor="middle" font-family="monospace" font-size="8" fill="#4a5568">Schéma illustratif — @SekounaKABA | DataLinkedAI</text>
+    </svg>`
+  },
+  'default': {
+    label: 'Architecture Data — Vue générale',
+    svg: `<svg viewBox="0 0 480 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:480px;border-radius:10px">
+      <rect width="480" height="200" fill="#0C1630" rx="10"/>
+      <text x="240" y="22" text-anchor="middle" font-family="monospace" font-size="11" fill="#7B8DB5">MODERN DATA STACK — VUE GÉNÉRALE</text>
+      <!-- Layer labels -->
+      <text x="60" y="45" text-anchor="middle" font-family="monospace" font-size="9" fill="#4a5568">COLLECT</text>
+      <text x="175" y="45" text-anchor="middle" font-family="monospace" font-size="9" fill="#4a5568">STORE</text>
+      <text x="290" y="45" text-anchor="middle" font-family="monospace" font-size="9" fill="#4a5568">TRANSFORM</text>
+      <text x="410" y="45" text-anchor="middle" font-family="monospace" font-size="9" fill="#4a5568">SERVE</text>
+      <!-- Boxes -->
+      <rect x="18" y="56" width="82" height="100" rx="8" fill="#1A56FF11" stroke="#1A56FF44" stroke-width="1.2"/>
+      <text x="59" y="85" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">Kafka</text>
+      <text x="59" y="99" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">Fivetran</text>
+      <text x="59" y="113" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">Airbyte</text>
+      <text x="59" y="127" text-anchor="middle" font-family="monospace" font-size="8" fill="#7B8DB5">APIs</text>
+      <line x1="100" y1="106" x2="128" y2="106" stroke="#1A56FF" stroke-width="1.5" marker-end="url(#d1)"/>
+      <rect x="128" y="56" width="90" height="100" rx="8" fill="#7C3AED11" stroke="#7C3AED44" stroke-width="1.2"/>
+      <text x="173" y="85" text-anchor="middle" font-family="monospace" font-size="8" fill="#C4B5FD">Snowflake</text>
+      <text x="173" y="99" text-anchor="middle" font-family="monospace" font-size="8" fill="#C4B5FD">Databricks</text>
+      <text x="173" y="113" text-anchor="middle" font-family="monospace" font-size="8" fill="#C4B5FD">BigQuery</text>
+      <text x="173" y="127" text-anchor="middle" font-family="monospace" font-size="8" fill="#C4B5FD">S3 / ADLS</text>
+      <line x1="218" y1="106" x2="246" y2="106" stroke="#7C3AED" stroke-width="1.5" marker-end="url(#d2)"/>
+      <rect x="246" y="56" width="86" height="100" rx="8" fill="#F59E0B11" stroke="#F59E0B44" stroke-width="1.2"/>
+      <text x="289" y="85" text-anchor="middle" font-family="monospace" font-size="8" fill="#FCD34D">dbt Core</text>
+      <text x="289" y="99" text-anchor="middle" font-family="monospace" font-size="8" fill="#FCD34D">PySpark</text>
+      <text x="289" y="113" text-anchor="middle" font-family="monospace" font-size="8" fill="#FCD34D">Airflow</text>
+      <text x="289" y="127" text-anchor="middle" font-family="monospace" font-size="8" fill="#FCD34D">Great Exp.</text>
+      <line x1="332" y1="106" x2="360" y2="106" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#d3)"/>
+      <rect x="360" y="56" width="100" height="100" rx="8" fill="#00B96B11" stroke="#00B96B44" stroke-width="1.2"/>
+      <text x="410" y="85" text-anchor="middle" font-family="monospace" font-size="8" fill="#00B96B">Tableau</text>
+      <text x="410" y="99" text-anchor="middle" font-family="monospace" font-size="8" fill="#00B96B">Power BI</text>
+      <text x="410" y="113" text-anchor="middle" font-family="monospace" font-size="8" fill="#00B96B">Looker</text>
+      <text x="410" y="127" text-anchor="middle" font-family="monospace" font-size="8" fill="#00B96B">APIs ML</text>
+      <defs>
+        <marker id="d1" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#1A56FF"/></marker>
+        <marker id="d2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7C3AED"/></marker>
+        <marker id="d3" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#F59E0B"/></marker>
+      </defs>
+      <text x="240" y="190" text-anchor="middle" font-family="monospace" font-size="8" fill="#4a5568">Schéma illustratif — @SekounaKABA | DataLinkedAI</text>
+    </svg>`
+  }
+};
+
+// Map topics → diagram keys
+const TOPIC_TO_ARCH = {
+  'Snowflake': 'Snowflake', 'DBT Core': 'Snowflake',
+  'Medallion Architecture': 'Medallion Architecture',
+  'Apache Airflow': 'Apache Airflow',
+  'PySpark': 'Apache Airflow', 'Kafka': 'Apache Airflow',
+  'AWS Data': 'default', 'Azure Lakehouse': 'Medallion Architecture',
+  'GCP BigQuery': 'Snowflake',
+};
+
+function buildArchImageBlock(topic, content) {
+  const archKey = TOPIC_TO_ARCH[topic] || 'default';
+  const arch = ARCH_DIAGRAMS[archKey];
+
+  // Detect client names to warn (SACEM, Thales, Accor)
+  const clientWarning = /SACEM|Thales|Accor|Dataiku/i.test(content)
+    ? `<div style="background:#FFF3CD;border:1px solid #F59E0B;border-radius:8px;padding:.7rem .9rem;margin-bottom:.75rem;font-size:.8rem;color:#92400e">
+        ⚠️ <strong>Noms de clients détectés dans le post.</strong> Remplace SACEM / Thales / Accor par des formulations génériques comme <em>"grande entreprise de médias"</em>, <em>"groupe industriel de défense"</em>, <em>"leader de l'hôtellerie"</em> pour préserver la confidentialité.
+       </div>`
+    : '';
+
+  return `
+  <div class="card" style="margin-top:1rem">
+    <h3>🖼️ Image d'architecture suggérée pour ce post</h3>
+    ${clientWarning}
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:.85rem">
+      Ajoute ce schéma technique à ton post LinkedIn pour illustrer sans mentionner de clients.
+      <strong style="color:var(--ink2)"> Les recruteurs et pairs Data s'arrêtent sur les visuels techniques.</strong>
+    </p>
+    <div style="background:#0C1630;border-radius:10px;padding:.5rem;margin-bottom:.75rem">
+      ${arch.svg}
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-primary btn-sm" onclick="downloadArchSVG('${archKey}')">⬇️ Télécharger SVG</button>
+      <button class="btn btn-secondary btn-sm" onclick="copyArchSVG('${archKey}')">📋 Copier SVG</button>
+      <span style="font-size:.72rem;color:var(--dim)">💡 Conseil : ouvre le SVG dans Figma ou Canva pour personnaliser les couleurs</span>
+    </div>
+    <div style="margin-top:.75rem;padding:.6rem .8rem;background:var(--blue-soft);border-radius:8px;font-size:.78rem;color:var(--blue)">
+      🎨 <strong>Autres diagrammes disponibles :</strong>
+      ${Object.keys(ARCH_DIAGRAMS).map(k =>
+        `<button class="btn btn-secondary btn-sm" style="margin:.2rem" onclick="swapDiagram('${k}')">${k === 'default' ? 'Modern Stack' : k}</button>`
+      ).join('')}
+    </div>
+    <div id="arch-diagram-swap"></div>
+  </div>`;
+}
+
+function downloadArchSVG(key) {
+  const arch = ARCH_DIAGRAMS[key];
+  if (!arch) return;
+  const blob = new Blob([arch.svg], { type: 'image/svg+xml' });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement('a'), { href: url, download: `architecture-${key.replace(/\s+/g,'-').toLowerCase()}.svg` });
+  a.click(); URL.revokeObjectURL(url);
+  toast('SVG téléchargé !', 'success');
+}
+
+function copyArchSVG(key) {
+  const arch = ARCH_DIAGRAMS[key];
+  if (!arch) return;
+  navigator.clipboard.writeText(arch.svg).then(() => toast('SVG copié !', 'success'));
+}
+
+function swapDiagram(key) {
+  const arch = ARCH_DIAGRAMS[key];
+  if (!arch) return;
+  document.getElementById('arch-diagram-swap').innerHTML = `
+    <div style="margin-top:.75rem">
+      <div style="font-size:.75rem;font-weight:600;color:var(--dim);margin-bottom:.4rem">${arch.label}</div>
+      <div style="background:#0C1630;border-radius:10px;padding:.5rem">${arch.svg}</div>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        <button class="btn btn-primary btn-sm" onclick="downloadArchSVG('${key}')">⬇️ Télécharger</button>
+        <button class="btn btn-secondary btn-sm" onclick="copyArchSVG('${key}')">📋 Copier SVG</button>
+      </div>
+    </div>`;
+}
+
 async function loadOffers() {
   try {
-    const rows = await api('GET', '/api/offers');
+    const res = await api('GET', '/api/offers');
+    const rows = Array.isArray(res) ? res : (res.items || []);
     const el = document.getElementById('offers-list');
     if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">📋</div><p>Aucune offre analysée</p></div>'; return; }
     el.innerHTML = rows.map(o => offerRow(o)).join('');
@@ -1290,9 +1810,10 @@ async function genPost() {
         <h3>✅ Post généré</h3>
         <div class="output" style="white-space:pre-wrap">${r.content}</div>
         <div class="btn-row">
-          <button class="btn btn-primary btn-sm" onclick="clipCopy('${postClipId}')">📋 Copier</button>
+          <button class="btn btn-primary btn-sm" onclick="clipCopy('${postClipId}')">📋 Copier le texte</button>
         </div>
-      </div>`;
+      </div>
+      ${buildArchImageBlock(r.topic || document.getElementById('post-topic').value, r.content)}`;
     toast('Post LinkedIn généré !', 'success');
     loadPosts();
   } catch(e) { toast('Erreur: ' + e.message, 'error'); }
@@ -1827,6 +2348,317 @@ async function checkValidationBadge() {
       badge.style.display = 'inline';
     }
   } catch(e) {}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  PROFIL ÉDITEUR
+// ══════════════════════════════════════════════════════════════════════
+
+let _currentProfile = {};
+
+async function loadProfileEdit() {
+  try {
+    _currentProfile = await api('GET', '/api/profile');
+    const p = _currentProfile;
+    // Identité
+    document.getElementById('prof-name').value      = p.name || '';
+    document.getElementById('prof-title').value     = p.title || '';
+    document.getElementById('prof-email').value     = p.email || '';
+    document.getElementById('prof-phone').value     = p.phone || '';
+    document.getElementById('prof-location').value  = p.location || '';
+    document.getElementById('prof-years').value     = p.years_xp || '';
+    document.getElementById('prof-bio').value       = p.bio || '';
+    document.getElementById('prof-linkedin').value  = p.linkedin_url || '';
+    document.getElementById('prof-github').value    = p.github_url || '';
+    // Secteur
+    document.getElementById('prof-sector').value    = p.sector || 'Data & Tech';
+    // TJM
+    document.getElementById('prof-work-type').value    = p.work_type || 'freelance';
+    document.getElementById('prof-tjm-min').value      = p.tjm_min || '';
+    document.getElementById('prof-tjm-max').value      = p.tjm_max || '';
+    document.getElementById('prof-tjm-current').value  = p.tjm_current || '';
+    document.getElementById('prof-tjm-target').value   = p.tjm_target || '';
+    document.getElementById('prof-salary-min').value   = p.salary_min || '';
+    document.getElementById('prof-availability').value = p.availability || 'Disponible';
+    document.getElementById('prof-remote').checked     = p.remote_ok !== false;
+    document.getElementById('prof-relocation').checked = p.relocation_ok === true;
+    // Skills
+    document.getElementById('prof-skills').value = (p.skills || []).join(', ');
+    // Certs / Langs
+    document.getElementById('prof-certs').value  = (p.certifications || []).join('\n');
+    document.getElementById('prof-langs').value  = (p.languages || []).map(l => `${l.lang} — ${l.level}`).join('\n');
+    // Keywords
+    document.getElementById('prof-keywords').value = (p.keywords || []).join(', ');
+    // Expériences
+    renderExpList(p.experiences || []);
+    // Presets sectoriels
+    await loadSectorPresets(p.sector);
+  } catch(e) {
+    toast('Erreur chargement profil: ' + e.message, 'error');
+  }
+}
+
+async function loadSectorPresets(currentSector) {
+  try {
+    const data = await api('GET', '/api/sectors');
+    const container = document.getElementById('sector-presets');
+    container.innerHTML = data.sectors.map(s => `
+      <button class="btn btn-sm ${s === currentSector ? 'btn-primary' : 'btn-secondary'}"
+        onclick="selectSector('${s}', this)">${s}</button>
+    `).join('');
+  } catch(e) {}
+}
+
+function selectSector(sector, btn) {
+  document.getElementById('prof-sector').value = sector;
+  document.querySelectorAll('#sector-presets button').forEach(b => b.className = 'btn btn-sm btn-secondary');
+  btn.className = 'btn btn-sm btn-primary';
+}
+
+function renderExpList(exps) {
+  const container = document.getElementById('exp-list');
+  container.innerHTML = (exps || []).map((e, i) => `
+    <div class="exp-edit-row" data-idx="${i}" style="background:var(--bg);border-radius:var(--radius-sm);padding:.75rem;margin-bottom:.5rem;border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-family:var(--font-mono);color:var(--dim)">Expérience ${i+1}</span>
+        <button class="btn btn-sm" style="background:var(--red-soft);color:var(--red);padding:.2rem .5rem" onclick="removeExp(${i})">✕</button>
+      </div>
+      <div class="form-grid">
+        <div class="form-row" style="margin-bottom:.4rem"><label style="font-size:.7rem">Entreprise</label><input type="text" class="exp-company" value="${e.company||''}" placeholder="Nom entreprise"></div>
+        <div class="form-row" style="margin-bottom:.4rem"><label style="font-size:.7rem">Période</label><input type="text" class="exp-period" value="${e.period||''}" placeholder="Jan 2023 → Present"></div>
+        <div class="form-row" style="margin-bottom:.4rem"><label style="font-size:.7rem">Rôle</label><input type="text" class="exp-role" value="${e.role||''}" placeholder="Data Engineer Senior"></div>
+        <div class="form-row" style="margin-bottom:.4rem"><label style="font-size:.7rem">Stack technique</label><input type="text" class="exp-stack" value="${e.stack||''}" placeholder="Python, AWS, Snowflake..."></div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function addExpRow() {
+  const exps = collectExps();
+  exps.push({company:'',period:'',role:'',stack:''});
+  renderExpList(exps);
+}
+
+function removeExp(idx) {
+  const exps = collectExps();
+  exps.splice(idx, 1);
+  renderExpList(exps);
+}
+
+function collectExps() {
+  const rows = document.querySelectorAll('.exp-edit-row');
+  return Array.from(rows).map(r => ({
+    company: r.querySelector('.exp-company').value,
+    period:  r.querySelector('.exp-period').value,
+    role:    r.querySelector('.exp-role').value,
+    stack:   r.querySelector('.exp-stack').value,
+  }));
+}
+
+async function saveProfile() {
+  const btn = document.querySelector('#page-profile-edit .btn-primary');
+  const out = document.getElementById('profile-save-output');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Sauvegarde...';
+
+  const certs = document.getElementById('prof-certs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const langs  = document.getElementById('prof-langs').value.split('\n').map(s=>{
+    const parts = s.split('—').map(x=>x.trim());
+    return parts.length>=2 ? {lang: parts[0], level: parts[1]} : {lang: parts[0], level: ''};
+  }).filter(l=>l.lang);
+
+  const payload = {
+    name:          document.getElementById('prof-name').value,
+    title:         document.getElementById('prof-title').value,
+    email:         document.getElementById('prof-email').value,
+    phone:         document.getElementById('prof-phone').value,
+    location:      document.getElementById('prof-location').value,
+    sector:        document.getElementById('prof-sector').value || 'Data & Tech',
+    work_type:     document.getElementById('prof-work-type').value,
+    years_xp:      parseInt(document.getElementById('prof-years').value) || 0,
+    bio:           document.getElementById('prof-bio').value,
+    linkedin_url:  document.getElementById('prof-linkedin').value,
+    github_url:    document.getElementById('prof-github').value,
+    tjm_min:       parseInt(document.getElementById('prof-tjm-min').value) || 0,
+    tjm_max:       parseInt(document.getElementById('prof-tjm-max').value) || 0,
+    tjm_current:   parseInt(document.getElementById('prof-tjm-current').value) || 0,
+    tjm_target:    parseInt(document.getElementById('prof-tjm-target').value) || 0,
+    salary_min:    parseInt(document.getElementById('prof-salary-min').value) || 0,
+    availability:  document.getElementById('prof-availability').value,
+    remote_ok:     document.getElementById('prof-remote').checked,
+    relocation_ok: document.getElementById('prof-relocation').checked,
+    skills:        document.getElementById('prof-skills').value.split(',').map(s=>s.trim()).filter(Boolean),
+    certifications: certs,
+    languages:     langs,
+    keywords:      document.getElementById('prof-keywords').value.split(',').map(s=>s.trim()).filter(Boolean),
+    experiences:   collectExps(),
+  };
+
+  try {
+    const r = await api('PUT', '/api/profile', payload);
+    out.innerHTML = `<div style="color:var(--green);font-size:.82rem;padding:.5rem;background:var(--green-soft);border-radius:var(--radius-sm)">✅ Profil sauvegardé ! Tous les modules IA utilisent maintenant ce profil.</div>`;
+    toast('Profil mis à jour ✅', 'success');
+    _currentProfile = r.profile;
+  } catch(e) {
+    out.innerHTML = `<div style="color:var(--red);font-size:.82rem">${e.message}</div>`;
+    toast('Erreur sauvegarde', 'error');
+  }
+  btn.disabled = false;
+  btn.innerHTML = '💾 Sauvegarder le profil';
+}
+
+function previewProfile() {
+  const modal = document.getElementById('cv-preview-modal');
+  const body  = document.getElementById('cv-preview-body');
+  body.innerHTML = `<pre style="font-size:.72rem;overflow:auto;max-height:500px;white-space:pre-wrap">${JSON.stringify(_currentProfile, null, 2)}</pre>`;
+  modal.style.display = 'block';
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  MOCK INTERVIEW IA
+// ══════════════════════════════════════════════════════════════════════
+
+let _activeSessionId = null;
+
+async function startInterview() {
+  const title = document.getElementById('itv-offer-title').value.trim();
+  if (!title) { toast('Saisis un titre de poste', 'error'); return; }
+  const btn = document.getElementById('btn-itv-start');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Démarrage...';
+
+  try {
+    const r = await api('POST', '/api/interview/start', {
+      offer_title: title,
+      offer_description: document.getElementById('itv-offer-desc').value,
+      difficulty: document.getElementById('itv-difficulty').value,
+    });
+    _activeSessionId = r.session_id;
+    openInterviewChat(title, r.difficulty, r.messages);
+    toast('Entretien démarré !', 'success');
+  } catch(e) {
+    toast('Erreur: ' + e.message, 'error');
+  }
+  btn.disabled = false;
+  btn.innerHTML = '🎤 Démarrer l\'entretien';
+}
+
+function openInterviewChat(title, difficulty, messages) {
+  const card = document.getElementById('interview-chat-card');
+  card.style.display = 'block';
+  document.getElementById('interview-chat-title').textContent = `🎤 ${title}`;
+  const diffColors = {easy: 'badge-green', medium: 'badge-amber', hard: 'badge-red'};
+  const diffLabels = {easy: '🟢 Facile', medium: '🟡 Moyen', hard: '🔴 Expert'};
+  const badge = document.getElementById('interview-difficulty-badge');
+  badge.className = 'badge ' + (diffColors[difficulty] || 'badge-blue');
+  badge.textContent = diffLabels[difficulty] || difficulty;
+  document.getElementById('interview-final-score').style.display = 'none';
+  renderMessages(messages);
+  card.scrollIntoView({behavior:'smooth'});
+}
+
+function renderMessages(messages) {
+  const container = document.getElementById('interview-messages');
+  container.innerHTML = messages.map(m => {
+    const isRecruiter = m.role === 'assistant';
+    const scoreMatch = m.content.match(/\[SCORE:(\d+)\/10\]/);
+    const finalMatch = m.content.match(/\[FINAL:(\d+)\/10\]/);
+    const score = scoreMatch || finalMatch;
+    const cleanContent = m.content
+      .replace(/\[SCORE:\d+\/10\]/g, '')
+      .replace(/\[FINAL:\d+\/10\]/g, '');
+    return `
+      <div style="display:flex;gap:.65rem;align-items:flex-start;${isRecruiter ? '' : 'flex-direction:row-reverse'}">
+        <div style="width:30px;height:30px;border-radius:50%;background:${isRecruiter ? 'linear-gradient(135deg,var(--blue),var(--purple))' : 'linear-gradient(135deg,var(--green),#00d4aa)'};display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0;color:#fff">
+          ${isRecruiter ? '🧑‍💼' : '👤'}
+        </div>
+        <div style="max-width:75%;background:${isRecruiter ? 'var(--blue-soft)' : 'var(--surface)'};border:1.5px solid ${isRecruiter ? 'rgba(26,86,255,.15)' : 'var(--border)'};border-radius:${isRecruiter ? '4px 12px 12px 12px' : '12px 4px 12px 12px'};padding:.75rem 1rem;font-size:.82rem;line-height:1.65;color:var(--ink2)">
+          ${cleanContent.replace(/\n/g, '<br>')}
+          ${score ? `<div style="margin-top:.4rem;font-family:var(--font-mono);font-size:.72rem;color:${finalMatch ? 'var(--purple)' : 'var(--blue)'}">⭐ ${score[0].replace(/[\[\]]/g,'')}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+  container.scrollTop = container.scrollHeight;
+}
+
+async function sendAnswer() {
+  if (!_activeSessionId) return;
+  const input = document.getElementById('itv-answer');
+  const answer = input.value.trim();
+  if (!answer) return;
+
+  const btn = document.getElementById('btn-itv-send');
+  btn.disabled = true;
+  btn.textContent = '...';
+  input.value = '';
+  input.disabled = true;
+
+  try {
+    const r = await api('POST', '/api/interview/answer', {
+      session_id: _activeSessionId, answer
+    });
+    renderMessages(r.messages);
+    if (r.is_final) {
+      document.getElementById('interview-input-area').style.display = 'none';
+      const scoreEl = document.getElementById('interview-final-score');
+      const scoreColor = (r.final_score||0) >= 7 ? 'var(--green)' : (r.final_score||0) >= 5 ? 'var(--amber)' : 'var(--red)';
+      scoreEl.style.display = 'block';
+      scoreEl.innerHTML = `
+        <div style="background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff;border-radius:var(--radius);padding:1.25rem;text-align:center">
+          <div style="font-size:.75rem;opacity:.8;margin-bottom:.25rem">SCORE FINAL</div>
+          <div style="font-family:var(--font-head);font-size:3rem;font-weight:800">${r.final_score || '?'}<span style="font-size:1.5rem">/10</span></div>
+          <div style="margin-top:.75rem;font-size:.85rem;opacity:.9">Entretien terminé · Analyse dans les messages ci-dessus</div>
+        </div>`;
+      loadInterviewSessions();
+    }
+  } catch(e) {
+    toast('Erreur: ' + e.message, 'error');
+    input.value = answer; // restore on error
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Envoyer ↵';
+  input.disabled = false;
+  if (!document.getElementById('interview-final-score').style.display || document.getElementById('interview-final-score').style.display === 'none') {
+    input.focus();
+  }
+}
+
+function endInterview() {
+  _activeSessionId = null;
+  document.getElementById('interview-chat-card').style.display = 'none';
+  document.getElementById('interview-input-area').style.display = 'flex';
+  document.getElementById('itv-offer-title').value = '';
+  document.getElementById('itv-offer-desc').value = '';
+  loadInterviewSessions();
+}
+
+async function loadInterviewSessions() {
+  const container = document.getElementById('interview-sessions-list');
+  try {
+    const sessions = await api('GET', '/api/interview/sessions');
+    if (!sessions.length) {
+      container.innerHTML = '<div class="empty"><div class="emoji">🎤</div><p>Aucun entretien pour l\'instant<br><small>Lance un entretien pour pratiquer !</small></p></div>';
+      return;
+    }
+    const diffColors = {easy:'badge-green', medium:'badge-amber', hard:'badge-red'};
+    const diffLabels = {easy:'Facile', medium:'Moyen', hard:'Expert'};
+    container.innerHTML = sessions.map(s => `
+      <div style="padding:.65rem .75rem;border:1.5px solid var(--border);border-radius:var(--radius-sm);margin-bottom:.5rem;background:var(--surface);display:flex;align-items:center;gap:.75rem">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.82rem;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.offer_title}</div>
+          <div style="display:flex;gap:.4rem;align-items:center;margin-top:.2rem">
+            <span class="badge ${diffColors[s.difficulty]||'badge-blue'}" style="font-size:.6rem">${diffLabels[s.difficulty]||s.difficulty}</span>
+            <span class="badge ${s.status==='completed'?'badge-green':'badge-amber'}" style="font-size:.6rem">${s.status==='completed'?'Terminé':'En cours'}</span>
+            ${s.score ? `<span style="font-size:.68rem;font-family:var(--font-mono);color:var(--blue)">⭐ ${s.score}/10</span>` : ''}
+          </div>
+        </div>
+        <span style="font-size:.65rem;color:var(--dim);font-family:var(--font-mono);flex-shrink:0">${new Date(s.created_at).toLocaleDateString('fr')}</span>
+      </div>
+    `).join('');
+  } catch(e) {
+    container.innerHTML = `<div style="color:var(--dim);font-size:.8rem;padding:.5rem">${e.message}</div>`;
+  }
 }
 
 // -- INIT ----------------------------------------------------------

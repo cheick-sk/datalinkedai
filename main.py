@@ -140,26 +140,123 @@ def _check_rate(request: Request, endpoint: str, max_calls: int = 10, window: in
         raise HTTPException(429, f"Trop de requetes — max {max_calls} par heure pour {endpoint}")
 
 # ── Profil Sekouna ─────────────────────────────────────────────────
-PROFILE = {
+# ── Profil par défaut (écrasé dynamiquement depuis la DB après init_db) ──────
+DEFAULT_PROFILE = {
     "name": "KABA Sekouna", "title": "Data Engineer Senior — Lead Tech",
     "email": "kaba.sekouna@gmail.com", "phone": "+33 06 59 02 21 57",
     "location": "Montreuil, Ile-de-France",
+    "sector": "Data & Tech",
+    "work_type": "freelance",          # freelance | salarie | both
+    "availability": "Disponible",
     "tjm_min": 500, "tjm_max": 900, "tjm_current": 650, "tjm_target": 760,
+    "salary_min": 0, "salary_max": 0,  # pour mode salarié
+    "years_xp": 8,
+    "bio": "Data Architect & Engineer Senior freelance avec 8 ans d'expérience sur des missions grands comptes (SACEM, Thales, Accor). Spécialisé cloud data platforms, Snowflake, dbt, Airflow.",
+    "linkedin_url": "",
+    "github_url": "",
+    "portfolio_url": "",
     "experiences": [
-        {"company": "SACEM",         "period": "Juin 2024 → Present",     "role": "Data Architect/Engineer",
+        {"company": "SACEM",          "period": "Juin 2024 → Present",  "role": "Data Architect/Engineer",
          "stack": "Snowflake, PySpark, Python, Airflow, DBT Core, S3, Kafka, Lambda AWS, SnowPipe, CI/CD GitLab"},
-        {"company": "MSO-SOFT",      "period": "Dec 2023 - Juil 2024",    "role": "Data Architect/Engineer",
+        {"company": "MSO-SOFT",       "period": "Dec 2023 - Juil 2024", "role": "Data Architect/Engineer",
          "stack": "Docker, DBT-Core, Airflow, Apache Superset, Minio, PostgreSQL, GitLab CI/CD"},
-        {"company": "Thales Group",  "period": "Oct 2022 - Dec 2023",     "role": "Data Architect Senior",
+        {"company": "Thales Group",   "period": "Oct 2022 - Dec 2023",  "role": "Data Architect Senior",
          "stack": "GCP BigQuery, PySpark, Talend, Dataiku, Azure ADLS Gen2, AWS RDS"},
-        {"company": "Accor",         "period": "Nov 2021 - Oct 2022",     "role": "Consultant Data Engineer/BI",
+        {"company": "Accor",          "period": "Nov 2021 - Oct 2022",  "role": "Consultant Data Engineer/BI",
          "stack": "Snowflake, DBT Core, Terraform, Talend Cloud, AWS Glue, Azure"},
-        {"company": "ARCADE (Keyrus)","period": "Fev 2021 - Oct 2021",    "role": "Tech Lead BI/Data Engineer",
+        {"company": "ARCADE (Keyrus)","period": "Fev 2021 - Oct 2021",  "role": "Tech Lead BI/Data Engineer",
          "stack": "Azure DevOps, Snowflake, Azure Storage, Power BI, Talend 7"},
     ],
     "skills": ["Snowflake", "DBT Core", "Apache Airflow", "PySpark", "Python", "Kafka",
                "AWS", "Azure", "GCP", "Terraform", "GitLab CI/CD", "Docker",
                "PostgreSQL", "Power BI", "Tableau", "Dataiku"],
+    "certifications": ["AWS Certified", "GCP Professional Data Engineer", "Snowflake SnowPro Core"],
+    "languages": [{"lang": "Français", "level": "Natif"}, {"lang": "Anglais", "level": "Courant"}],
+    "education": [{"degree": "Master Informatique / Data Engineering", "school": "", "year": "2016"}],
+    "soft_skills": ["Leadership technique", "Communication client", "Adaptabilité", "Rigueur"],
+    "remote_ok": True,
+    "relocation_ok": False,
+    "keywords": [],   # mots-clés supplémentaires pour le scraping
+}
+
+PROFILE: dict = dict(DEFAULT_PROFILE)   # sera écrasé par load_profile() après init_db
+
+def load_profile():
+    """Charge le profil depuis la DB (table user_profile). Fallback sur DEFAULT_PROFILE."""
+    global PROFILE
+    try:
+        with db_conn() as conn:
+            row = db_exec(conn, "SELECT data FROM user_profile WHERE id=1").fetchone()
+            if row:
+                PROFILE = json.loads(row[0])
+                logger.info(f"Profil chargé depuis DB: {PROFILE.get('name','?')}")
+                return
+    except Exception as e:
+        logger.warning(f"load_profile: {e} — utilise DEFAULT_PROFILE")
+    PROFILE = dict(DEFAULT_PROFILE)
+
+# ── Presets sectoriels ────────────────────────────────────────────────────────
+SECTOR_PRESETS = {
+    "Data & Tech": {
+        "search_queries": ["Data Engineer freelance France", "Data Architect senior remote", "Lead Data Engineer Snowflake DBT"],
+        "platforms": ["LinkedIn", "WTTJ", "Malt", "Comet", "RemoteOK"],
+        "tjm_range": [400, 1000],
+        "post_topics": ["Snowflake vs Databricks", "dbt Core en production", "Architecture Medallion", "PySpark optimisation", "Kafka streaming"],
+    },
+    "Développement Web & Mobile": {
+        "search_queries": ["Développeur React freelance", "Lead Dev fullstack remote France", "Architecte logiciel senior freelance"],
+        "platforms": ["LinkedIn", "WTTJ", "Malt", "Comet", "Upwork"],
+        "tjm_range": [350, 850],
+        "post_topics": ["Next.js 14 en prod", "React vs Vue en 2025", "API REST vs GraphQL", "Micro-frontends retour d'expérience"],
+    },
+    "Design & UX": {
+        "search_queries": ["UX Designer freelance France", "Product Designer senior remote", "UI/UX Lead freelance"],
+        "platforms": ["LinkedIn", "WTTJ", "Malt", "Dribbble", "Behance"],
+        "tjm_range": [300, 750],
+        "post_topics": ["Design System en pratique", "UX Research vs assumption", "Figma vs Sketch en 2025", "Comment convaincre un dev"],
+    },
+    "Marketing & Growth": {
+        "search_queries": ["Growth Hacker freelance France", "CMO freelance remote", "SEO consultant senior"],
+        "platforms": ["LinkedIn", "WTTJ", "Malt", "Indeed"],
+        "tjm_range": [300, 700],
+        "post_topics": ["Growth loops qui marchent vraiment", "SEO technique en 2025", "Acquisition payante vs organique", "Email marketing vs social"],
+    },
+    "Finance & Conseil": {
+        "search_queries": ["Consultant finance freelance", "Expert comptable freelance", "Analyste financier senior remote"],
+        "platforms": ["LinkedIn", "Indeed", "Malt"],
+        "tjm_range": [400, 1200],
+        "post_topics": ["Due diligence en pratique", "Modélisation financière avancée", "Freelance vs cabinet", "Lever du capital en 2025"],
+    },
+    "Santé & Biotech": {
+        "search_queries": ["Consultant santé freelance", "Data Scientist médical remote", "Chef de projet Santé freelance"],
+        "platforms": ["LinkedIn", "Indeed", "WTTJ"],
+        "tjm_range": [400, 900],
+        "post_topics": ["IA en médecine réalités", "RGPD données de santé", "Interopérabilité HL7/FHIR", "Essais cliniques et data"],
+    },
+    "Industrie & Ingénierie": {
+        "search_queries": ["Ingénieur industriel freelance", "Chef de projet industrie remote", "Consultant lean manufacturing"],
+        "platforms": ["LinkedIn", "Indeed", "Malt"],
+        "tjm_range": [400, 900],
+        "post_topics": ["Industrie 4.0 retour terrain", "Lean vs Agile en production", "IoT industriel en pratique", "Supply chain resilience"],
+    },
+    "Juridique & Compliance": {
+        "search_queries": ["Juriste freelance France", "DPO freelance remote", "Compliance officer consultant"],
+        "platforms": ["LinkedIn", "Indeed", "Malt"],
+        "tjm_range": [450, 1100],
+        "post_topics": ["RGPD 5 ans après", "AI Act impacts pratiques", "Contrat freelance pièges", "Compliance vs business"],
+    },
+    "RH & Management": {
+        "search_queries": ["DRH freelance France", "Consultant RH remote", "Coach professionnel certifié freelance"],
+        "platforms": ["LinkedIn", "Indeed", "Malt"],
+        "tjm_range": [350, 800],
+        "post_topics": ["Recrutement en 2025", "Télétravail leçons apprises", "Manager à distance", "Talent retention stratégies"],
+    },
+    "Autre / Personnalisé": {
+        "search_queries": [],
+        "platforms": ["LinkedIn", "Indeed", "WTTJ", "Malt"],
+        "tjm_range": [300, 900],
+        "post_topics": ["Mon domaine en 2025", "Freelance conseils pratiques", "Expertise rare = valeur"],
+    },
 }
 
 # ══════════════════════════════════════════════════════
@@ -250,6 +347,13 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS negotiations(id SERIAL PRIMARY KEY,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # ── NOUVELLES TABLES v10 ──────────────────────────────────────────────
+        # Profil utilisateur configurable (1 seule ligne, id=1)
+        "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # Sessions de mock interview
+        "CREATE TABLE IF NOT EXISTS interview_sessions(id SERIAL PRIMARY KEY,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # Cache scraping (évite de re-scraper les mêmes offres le même jour)
+        "CREATE TABLE IF NOT EXISTS scrape_cache(id SERIAL PRIMARY KEY,source TEXT,query_hash TEXT UNIQUE,results TEXT,scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
     ]
     if not USE_POSTGRES:
         tables = [
@@ -257,6 +361,7 @@ def init_db():
              .replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TEXT DEFAULT(datetime('now'))")
              .replace("TIMESTAMP,", "TEXT,")
              .replace("TIMESTAMP)", "TEXT)")
+             .replace("INTEGER PRIMARY KEY DEFAULT 1", "INTEGER PRIMARY KEY")
             for t in tables
         ]
     try:
@@ -773,23 +878,174 @@ async def generate_cv_pdf(cv_data: dict, offer_title: str = "") -> bytes:
 #  SCRAPING APIFY
 # ══════════════════════════════════════════════════════
 
-MOCK_OFFERS = [
-    {"title": "Lead Data Architect Snowflake + dbt", "company": "FinTech Scale-up",
-     "source": "LinkedIn", "url": "https://linkedin.com/jobs/1",
-     "description": "Data Architect freelance 12 mois full remote. Snowflake, dbt Core, Airflow, Python, AWS. Architecture medallion, migration legacy."},
-    {"title": "Data Architect Azure Lakehouse", "company": "Cabinet IT International",
-     "source": "Malt", "url": "https://malt.fr/mission/2",
-     "description": "12 mois remote. Azure Data Factory, ADLS Gen2, Databricks, dbt, Power BI. Architecture lakehouse enterprise."},
-    {"title": "Senior Data Engineer GCP BigQuery", "company": "Groupe Media",
-     "source": "Comet", "url": "https://comet.co/3",
-     "description": "6 mois full remote. GCP BigQuery, Dataflow, dbt, Airflow, Python. Pipelines streaming."},
-    {"title": "Data Platform Lead Databricks", "company": "Licorne SaaS",
-     "source": "WTTJ", "url": "https://wttj.co/4",
-     "description": "12 mois remote. Databricks Unity Catalog, dbt, Terraform, GitLab CI/CD, AWS. Data platform from scratch."},
-    {"title": "Lead Data Engineer Kafka + Spark", "company": "E-commerce Scale-up",
-     "source": "RemoteOK", "url": "https://remoteok.com/5",
-     "description": "9 mois full remote. Kafka, PySpark, Airflow, Snowflake. Plateforme data temps reel 50M evenements/jour."},
-]
+def _build_mock_offers() -> list:
+    """Génère des offres mock adaptées au secteur du profil actuel."""
+    sector = PROFILE.get("sector", "Data & Tech")
+    preset = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
+    name   = PROFILE.get("name", "").split()[-1] if PROFILE.get("name") else "vous"
+    title  = PROFILE.get("title", "Consultant Senior")
+    skills = PROFILE.get("skills", [])[:5]
+    tjm_min = PROFILE.get("tjm_min", 300)
+    tjm_max = PROFILE.get("tjm_max", 900)
+    platforms = preset["platforms"]
+    queries   = preset["search_queries"] or [f"{title} freelance France"]
+
+    mocks = []
+    for i, q in enumerate(queries[:5]):
+        kw = skills[i % len(skills)] if skills else "expertise"
+        mocks.append({
+            "title": f"{q.replace(' freelance France','').replace(' remote','').strip()} — Mission {i+1}",
+            "company": random.choice(["Scale-up Paris", "Groupe Industriel", "Cabinet Conseil", "Startup SaaS", "Grande Entreprise CAC40"]),
+            "source": platforms[i % len(platforms)],
+            "url": f"https://example.com/offre-{i+1}",
+            "description": (
+                f"Mission freelance 6-12 mois, full remote possible. "
+                f"Secteur: {sector}. Profil recherché: {title}. "
+                f"Compétences clés: {', '.join(skills[:4]) if skills else kw}. "
+                f"TJM {tjm_min}-{tjm_max}€/j selon profil. "
+                f"Démarrage dès que possible."
+            ),
+        })
+    return mocks
+
+MOCK_OFFERS: list = []   # rempli dynamiquement après load_profile()
+
+# ══════════════════════════════════════════════════════
+#  SCRAPERS GRATUITS — WTTJ · Indeed · Malt · RSS
+# ══════════════════════════════════════════════════════
+
+async def scrape_wttj(queries: list[str]) -> list:
+    """Welcome To The Jungle — recherche via leur API publique (pas de clé requise)."""
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
+        for q in queries[:2]:
+            try:
+                params = {"query": q, "page": 1, "per_page": 5, "contract_type[]": ["freelance", "contractor"]}
+                r = await cl.get("https://www.welcometothejungle.com/api/v1/jobs", params=params)
+                if r.status_code == 200:
+                    for job in r.json().get("jobs", [])[:5]:
+                        title   = job.get("name", "")
+                        company = job.get("company", {}).get("name", "")
+                        url     = f"https://www.welcometothejungle.com/fr/companies/{job.get('company',{}).get('slug','')}/jobs/{job.get('slug','')}"
+                        desc    = job.get("description", "") or f"{title} chez {company}"
+                        if title:
+                            offers.append({"title": title, "company": company,
+                                           "source": "WTTJ", "url": url,
+                                           "description": f"{title} chez {company}. {desc[:600]}"})
+            except Exception as e:
+                logger.debug(f"WTTJ scrape error: {e}")
+    return offers
+
+async def scrape_indeed_rss(queries: list[str], location: str = "France") -> list:
+    """Indeed — via le flux RSS public (pas de clé requise)."""
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
+        for q in queries[:2]:
+            try:
+                params = {"q": q, "l": location, "sort": "date", "limit": 10}
+                r = await cl.get("https://fr.indeed.com/rss", params=params)
+                if r.status_code == 200:
+                    # Parse RSS xml basique
+                    items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
+                    for item in items[:5]:
+                        title_m   = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)
+                        link_m    = re.search(r"<link>(.*?)</link>", item)
+                        desc_m    = re.search(r"<description><!\[CDATA\[(.*?)\]\]></description>", item)
+                        title     = title_m.group(1).strip() if title_m else ""
+                        url       = link_m.group(1).strip()  if link_m  else ""
+                        desc_raw  = desc_m.group(1).strip()  if desc_m  else ""
+                        desc_clean = re.sub(r"<[^>]+>", " ", desc_raw).strip()[:600]
+                        company_m = re.search(r"<source.*?>(.*?)</source>", item)
+                        company   = company_m.group(1) if company_m else ""
+                        if title:
+                            offers.append({"title": title, "company": company,
+                                           "source": "Indeed", "url": url,
+                                           "description": f"{title}. {desc_clean}"})
+            except Exception as e:
+                logger.debug(f"Indeed RSS error: {e}")
+    return offers
+
+async def scrape_remotive(queries: list[str]) -> list:
+    """Remotive.com — API JSON publique sans clé pour offres remote."""
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0) as cl:
+        for q in queries[:2]:
+            try:
+                r = await cl.get("https://remotive.com/api/remote-jobs",
+                                 params={"search": q, "limit": 5})
+                if r.status_code == 200:
+                    for job in r.json().get("jobs", [])[:5]:
+                        title   = job.get("title", "")
+                        company = job.get("company_name", "")
+                        url     = job.get("url", "")
+                        desc    = re.sub(r"<[^>]+>", " ", job.get("description", "")).strip()[:600]
+                        if title:
+                            offers.append({"title": title, "company": company,
+                                           "source": "Remotive", "url": url,
+                                           "description": f"{title} chez {company}. {desc}"})
+            except Exception as e:
+                logger.debug(f"Remotive error: {e}")
+    return offers
+
+async def scrape_freelance_com(queries: list[str]) -> list:
+    """Freelance.com — flux RSS public des missions."""
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
+        for q in queries[:1]:
+            try:
+                r = await cl.get(f"https://www.freelance.com/rss.php?mot={q.replace(' ','+')}")
+                if r.status_code == 200:
+                    items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
+                    for item in items[:4]:
+                        title_m = re.search(r"<title>(.*?)</title>", item)
+                        link_m  = re.search(r"<link>(.*?)</link>", item)
+                        desc_m  = re.search(r"<description>(.*?)</description>", item, re.DOTALL)
+                        title   = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else ""
+                        url     = link_m.group(1).strip() if link_m else ""
+                        desc    = re.sub(r"<[^>]+>", " ", desc_m.group(1)).strip()[:500] if desc_m else ""
+                        if title:
+                            offers.append({"title": title, "company": "", "source": "Freelance.com",
+                                           "url": url, "description": f"{title}. {desc}"})
+            except Exception as e:
+                logger.debug(f"Freelance.com RSS error: {e}")
+    return offers
+
+async def scrape_offers_free() -> list:
+    """Orchestrateur — scrapers gratuits en parallèle, dédoublonnage, fallback mock."""
+    sector  = PROFILE.get("sector", "Data & Tech")
+    preset  = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
+    queries = preset["search_queries"] or [PROFILE.get("title", "Consultant freelance")]
+    location = PROFILE.get("location", "France").split(",")[0].strip() or "France"
+
+    logger.info(f"Scraping gratuit — secteur: {sector}, {len(queries)} requêtes")
+    results = await asyncio.gather(
+        scrape_wttj(queries),
+        scrape_indeed_rss(queries, location),
+        scrape_remotive(queries),
+        scrape_freelance_com(queries),
+        return_exceptions=True,
+    )
+
+    all_offers = []
+    for r in results:
+        if isinstance(r, list):
+            all_offers.extend(r)
+        else:
+            logger.debug(f"Scraper exception: {r}")
+
+    if all_offers:
+        seen, deduped = set(), []
+        for o in all_offers:
+            key = o["title"].lower()[:40]
+            if key not in seen:
+                seen.add(key); deduped.append(o)
+        logger.info(f"Scraping gratuit: {len(deduped)} offres uniques")
+        return deduped[:10]
+
+    logger.warning("Scraping gratuit: aucun résultat — fallback mock")
+    return _build_mock_offers()
+
+MOCK_OFFERS: list = []   # rempli dynamiquement
 
 async def scrape_offers_apify() -> list:
     """Scraping via Apify avec fallback mock automatique."""
@@ -853,10 +1109,14 @@ async def scrape_offers_apify() -> list:
         return deduped[:8]
 
     logger.warning("Apify: aucun résultat — fallback mock")
-    return MOCK_OFFERS
+    return _build_mock_offers()
 
 async def get_offers_today() -> list:
-    return await scrape_offers_apify() if APIFY_TOKEN else MOCK_OFFERS
+    """Retourne les offres du jour. Priorité: Apify > scrapers gratuits > mock."""
+    if APIFY_TOKEN:
+        return await scrape_offers_apify()
+    offers = await scrape_offers_free()
+    return offers if offers else _build_mock_offers()
 
 # ══════════════════════════════════════════════════════
 #  COPILOT ENGINE
@@ -869,11 +1129,15 @@ async def run_copilot():
     raw_offers = await get_offers_today()
     analyzed, auto_applied = [], 0
     total = len(raw_offers)
+    name  = PROFILE.get("name", "Utilisateur")
+    title = PROFILE.get("title", "Consultant Senior")
+    tjm_min = PROFILE.get("tjm_min", 300)
+    tjm_max = PROFILE.get("tjm_max", 900)
 
     for idx, raw in enumerate(raw_offers):
         try:
             _copilot_status["step"] = f"Analyse offre {idx+1}/{total}: {raw.get('title','')[:40]}…"
-            result = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior freelance, TJM 500-900euro.
+            result = await ask_json(f"""{name} — {title}. TJM {tjm_min}-{tjm_max}€.
 Profil: {json.dumps(PROFILE)}
 Offre: {raw['description']}
 JSON: {{"match_score":<0-100>,"title":"{raw['title']}","tjm_negotiate":"<TJM 500-900euro>",
@@ -909,31 +1173,31 @@ JSON seul.""", 600,
     analyzed.sort(key=lambda x: x.get("match_score", 0), reverse=True)
     top3  = analyzed[:3]
     _copilot_status["step"] = "Génération du post LinkedIn…"
-    topic = random.choice([
-        "Snowflake vs Databricks", "dbt Core en production", "Architecture Medallion en pratique",
-        "PySpark optimisation avancée", "Kafka streaming temps réel", "TJM Freelance Data — comment négocier",
-        "Erreur que j ai faite en mission", "Ce que les ESN ne te disent pas", "Data Mesh vs Data Warehouse",
-        "Airflow en 2025 — toujours pertinent ?", "Comment j ai migré un legacy en 3 mois"
-    ])
+    sector  = PROFILE.get("sector", "Data & Tech")
+    preset  = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
+    topics  = preset.get("post_topics", ["Mon expertise en 2025", "Freelance conseils pratiques"])
+    topic   = random.choice(topics)
+    exps    = PROFILE.get("experiences", [])
+    recent_companies = ", ".join([e["company"] for e in exps[:3]]) if exps else "mes missions récentes"
     fmt = random.choice([
-        "Hook choc + histoire personnelle + leçon", "Liste numerotee contre-intuitive",
+        "Hook choc + histoire personnelle + leçon", "Liste numerotée contre-intuitive",
         "Confession professionnelle + twist", "Storytelling mission avec chiffres"
     ])
 
     try:
-        post = await ask(f"""Tu es Sekouna KABA, Data Architect/Engineer Senior freelance (SACEM, Thales, Accor).
+        post = await ask(f"""Tu es {name}, {title} freelance ({recent_companies}).
 {json.dumps(PROFILE)}
 
 Ecris un post LinkedIn en FRANÇAIS qui va exploser en engagement.
 
 SUJET: {topic}
 FORMAT: {fmt}
+SECTEUR: {sector}
 
-RÈGLES ABSOLUES pour un post viral Data/Tech:
+RÈGLES ABSOLUES pour un post viral:
 1. LIGNE 1 = hook IRRÉSISTIBLE (question provocatrice, stat choc, ou phrase courte qui force le "voir plus")
-   Exemples: "J'ai refusé une mission à 900€/j. Voici pourquoi." / "95% des architectures data ont ce défaut." / "3 ans de Snowflake. Ce que personne ne dit."
 2. Ligne 2 = ligne vide (pause dramatique)
-3. Corps = histoire CONCRÈTE avec tes missions réelles (SACEM/Thales/Accor/Dataiku) + chiffres précis
+3. Corps = histoire CONCRÈTE avec les missions réelles mentionnées dans le profil + chiffres précis
 4. Structure aérée : 1-2 phrases max par bloc, BEAUCOUP de sauts de ligne
 5. Fin = question engageante qui provoque les commentaires OU CTA fort
 6. 3-5 emojis bien placés (pas en début de chaque ligne)
@@ -1391,6 +1655,7 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️  Aucune clé IA — les endpoints IA renverront une erreur 500")
     logger.info("=" * 60)
     init_db()
+    load_profile()   # charge le profil depuis la DB (ou DEFAULT_PROFILE si première fois)
     scheduler.add_job(run_copilot,   CronTrigger(day_of_week="mon-fri", hour=COPILOT_HOUR, minute=0),
                       id="copilot",  replace_existing=True)
     scheduler.add_job(backup_database, CronTrigger(hour=2, minute=0),
@@ -1443,6 +1708,155 @@ async def health():
 async def profile(_=Depends(verify_api_key)):
     return PROFILE
 
+@app.put("/api/profile", tags=["Profil Utilisateur"])
+async def update_profile(request: Request, _=Depends(verify_api_key)):
+    """Met à jour le profil utilisateur et le persist en DB.
+    Accepte un JSON partiel — seuls les champs fournis sont mis à jour."""
+    global PROFILE
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body doit être un objet JSON")
+    # Merge : on ne remplace que les clés fournies
+    PROFILE = {**DEFAULT_PROFILE, **PROFILE, **body}
+    with db_conn() as conn:
+        # Upsert — SQLite et PostgreSQL compat
+        existing = db_exec(conn, "SELECT id FROM user_profile WHERE id=1").fetchone()
+        if existing:
+            db_exec(conn,
+                "UPDATE user_profile SET data=?, updated_at=? WHERE id=1",
+                (json.dumps(PROFILE), datetime.now().isoformat()))
+        else:
+            db_exec(conn,
+                "INSERT INTO user_profile(id,data,updated_at) VALUES(1,?,?)",
+                (json.dumps(PROFILE), datetime.now().isoformat()))
+    log_act("👤", f"Profil mis à jour: {PROFILE.get('name','?')}", "profile")
+    return {"status": "updated", "profile": PROFILE}
+
+@app.get("/api/sectors", tags=["Profil Utilisateur"])
+async def list_sectors(_=Depends(verify_api_key)):
+    """Retourne les presets sectoriels disponibles."""
+    return {
+        "sectors": list(SECTOR_PRESETS.keys()),
+        "presets": {k: {"search_queries": v["search_queries"], "tjm_range": v["tjm_range"],
+                        "platforms": v["platforms"]} for k, v in SECTOR_PRESETS.items()},
+        "current_sector": PROFILE.get("sector", "Data & Tech"),
+    }
+
+# ══════════════════════════════════════════════════════
+#  MOCK INTERVIEW IA
+# ══════════════════════════════════════════════════════
+
+class InterviewStartReq(BaseModel):
+    offer_title: str
+    offer_description: str = ""
+    difficulty: str = "medium"   # easy | medium | hard
+
+class InterviewAnswerReq(BaseModel):
+    session_id: int
+    answer: str
+
+@app.post("/api/interview/start", tags=["Mock Interview"])
+async def interview_start(req: InterviewStartReq, request: Request, _=Depends(verify_api_key)):
+    """Démarre une session de mock interview. L'IA joue le recruteur."""
+    _check_rate(request, "interview_start", 10, 3600)
+    diff_label = {"easy": "débutant — questions générales", "medium": "intermédiaire — questions techniques et comportementales",
+                  "hard": "expert — questions techniques poussées, mise en situation, stress test"}.get(req.difficulty, "intermédiaire")
+
+    system = f"""Tu es un recruteur expert pour le poste: {req.offer_title}.
+Profil candidat: {json.dumps(PROFILE)}
+Niveau: {diff_label}
+Secteur: {PROFILE.get('sector', 'Tech')}
+
+RÈGLES:
+- Commence TOUJOURS par te présenter brièvement et poser LA PREMIÈRE QUESTION uniquement
+- Pose 1 question à la fois, attends la réponse
+- Après chaque réponse: donne un feedback court (1-2 phrases), note /10 entre balises [SCORE:X/10], puis pose la suivante
+- Après 5 questions, conclus avec: bilan global, points forts, axes d'amélioration, note finale [FINAL:X/10]
+- Adapte les questions à l'offre ET au profil du candidat
+- Mélange: motivation, technique, situations passées, mises en situation
+- Ton: professionnel mais humain"""
+
+    first_msg = await ask(f"""{system}
+
+C'est le début de l'entretien. Présente-toi brièvement et pose ta première question.""", 600)
+
+    messages = [{"role": "assistant", "content": first_msg}]
+    with db_conn() as conn:
+        cur = db_insert(conn,
+            "INSERT INTO interview_sessions(offer_title,offer_description,difficulty,messages,status) VALUES(?,?,?,?,?)",
+            (req.offer_title, req.offer_description[:1000], req.difficulty, json.dumps(messages), "active"))
+        session_id = cur.lastrowid
+
+    log_act("🎤", f"Interview démarré: {req.offer_title}", "interview")
+    return {"session_id": session_id, "message": first_msg, "difficulty": req.difficulty, "messages": messages}
+
+@app.post("/api/interview/answer", tags=["Mock Interview"])
+async def interview_answer(req: InterviewAnswerReq, request: Request, _=Depends(verify_api_key)):
+    """Envoie une réponse et obtient la réaction + question suivante du recruteur IA."""
+    _check_rate(request, "interview_answer", 50, 3600)
+    with db_conn() as conn:
+        row = db_exec(conn, "SELECT offer_title,offer_description,difficulty,messages,status FROM interview_sessions WHERE id=?",
+                      (req.session_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Session introuvable")
+    if row[4] == "completed":
+        raise HTTPException(400, "Cette session est terminée")
+
+    offer_title, offer_desc, difficulty, msgs_raw, _ = row
+    messages: list = json.loads(msgs_raw)
+    messages.append({"role": "user", "content": req.answer})
+
+    diff_label = {"easy": "débutant", "medium": "intermédiaire", "hard": "expert"}.get(difficulty, "intermédiaire")
+    system = f"""Tu es un recruteur expert pour: {offer_title}. Profil candidat: {json.dumps(PROFILE)}. Niveau: {diff_label}.
+Règles: feedback 1-2 phrases + [SCORE:X/10] + question suivante OU bilan final [FINAL:X/10] si c'est la 5e réponse."""
+
+    # Construire le contexte conversationnel
+    conv_text = "\n".join([f"{'Recruteur' if m['role']=='assistant' else 'Candidat'}: {m['content']}" for m in messages[-8:]])
+    response = await ask(f"{system}\n\nConversation:\n{conv_text}\n\nRéponds maintenant (recruteur):", 500)
+
+    messages.append({"role": "assistant", "content": response})
+    is_final = "[FINAL:" in response
+    status   = "completed" if is_final else "active"
+
+    # Extraire le score final si présent
+    final_score = None
+    if is_final:
+        m = re.search(r"\[FINAL:(\d+)/10\]", response)
+        if m:
+            final_score = int(m.group(1))
+
+    with db_conn() as conn:
+        db_exec(conn,
+            "UPDATE interview_sessions SET messages=?, status=?, score=? WHERE id=?",
+            (json.dumps(messages), status, final_score, req.session_id))
+
+    if is_final:
+        log_act("🎤", f"Interview terminé: {offer_title} — score {final_score}/10", "interview")
+
+    return {"message": response, "messages": messages, "is_final": is_final,
+            "final_score": final_score, "status": status}
+
+@app.get("/api/interview/sessions", tags=["Mock Interview"])
+async def list_interview_sessions(_=Depends(verify_api_key)):
+    with db_conn() as conn:
+        rows = db_exec(conn,
+            "SELECT id,offer_title,difficulty,score,status,created_at FROM interview_sessions ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+    return [{"id": r[0], "offer_title": r[1], "difficulty": r[2], "score": r[3],
+             "status": r[4], "created_at": str(r[5])} for r in rows]
+
+@app.get("/api/interview/{session_id}", tags=["Mock Interview"])
+async def get_interview_session(session_id: int, _=Depends(verify_api_key)):
+    with db_conn() as conn:
+        row = db_exec(conn,
+            "SELECT id,offer_title,offer_description,difficulty,messages,score,feedback,status,created_at FROM interview_sessions WHERE id=?",
+            (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Session introuvable")
+    return {"id": row[0], "offer_title": row[1], "offer_description": row[2], "difficulty": row[3],
+            "messages": json.loads(row[4]), "score": row[5], "feedback": row[6],
+            "status": row[7], "created_at": str(row[8])}
+
 @app.get("/api/dashboard", tags=["Système"])
 async def dashboard(_=Depends(verify_api_key)):
     with db_conn() as conn:
@@ -1485,9 +1899,12 @@ class OfferReq(BaseModel):
 @app.post("/api/offers/analyze", tags=["Offres Freelance"])
 async def analyze_offer(request: Request, req: OfferReq, _=Depends(verify_api_key)):
     _check_rate(request, "analyze_offer", 20, 3600)
-    r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect, TJM 500-900euro.
+    name  = PROFILE.get("name","Consultant")
+    title = PROFILE.get("title","Consultant Senior")
+    tjm_min = PROFILE.get("tjm_min",300); tjm_max = PROFILE.get("tjm_max",900)
+    r = await ask_json(f"""{name} — {title}. TJM {tjm_min}-{tjm_max}€.
 Profil:{json.dumps(PROFILE)}\nOffre:---{req.text}---
-JSON:{{"match_score":<0-100>,"title":"<titre>","tjm_range":"<fourchette>","tjm_negotiate":"<TJM 500-900euro>",
+JSON:{{"match_score":<0-100>,"title":"<titre>","tjm_range":"<fourchette>","tjm_negotiate":"<TJM {tjm_min}-{tjm_max}€>",
 "remote":<bool>,"duration":"<duree>","key_techs":["<t1>","<t2>","<t3>","<t4>","<t5>"],
 "match_reasons":["<r1>","<r2>","<r3>"],"gaps":["<g1>"],
 "urgency":"<Postuler maintenant/Peut attendre/Moins prioritaire>",
@@ -1507,12 +1924,13 @@ async def list_offers(limit: int = 50, offset: int = 0, _=Depends(verify_api_key
         total = db_exec(conn, "SELECT COUNT(*) FROM offers").fetchone()[0]
         rows  = db_exec(
             conn,
-            f"SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at FROM offers ORDER BY created_at DESC LIMIT {min(limit,200)} OFFSET {offset}",
+            f"SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at,description FROM offers ORDER BY created_at DESC LIMIT {min(limit,200)} OFFSET {offset}",
         ).fetchall()
     return {"total": total, "offset": offset, "limit": limit,
             "items": [{"id": r[0], "title": r[1], "source": r[2], "match_score": r[3],
              "tjm_negotiate": r[4], "urgency": r[5], "status": r[6],
-             "url": r[7], "created_at": str(r[8])} for r in rows]}
+             "url": r[7], "created_at": str(r[8]),
+             "description": r[9] or ""} for r in rows]}
 
 # ── CV ───────────────────────────────────────────────
 class CVReq(BaseModel):
@@ -1522,14 +1940,17 @@ class CVReq(BaseModel):
 @app.post("/api/cv/adapt", tags=["CV Adaptatif"])
 async def adapt_cv(req: CVReq, request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "adapt_cv", 20, 3600)
-    _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 fois/heure
-    r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect, TJM 500-900euro.
+    _rate_limit(request, max_calls=10, window_seconds=3600)
+    name  = PROFILE.get("name","Consultant")
+    title = PROFILE.get("title","Consultant Senior")
+    tjm_min = PROFILE.get("tjm_min",300); tjm_max = PROFILE.get("tjm_max",900)
+    r = await ask_json(f"""{name} — {title}. TJM {tjm_min}-{tjm_max}€.
 CV:{json.dumps(PROFILE)}\nOffre:---{req.offer_text}---
 JSON:{{"score":<0-100>,"title_adapted":"<titre>","accroche":"<3 phrases 1ere personne>",
 "competences":["<s1>","<s2>","<s3>","<s4>","<s5>","<s6>"],
 "experiences":[{{"company":"<n>","period":"<p>","role":"<r>","pertinence":<0-100>,"pitch":"<1 phrase>","missions":["<m1>","<m2>","<m3>"]}}],
 "cover_letter":"<3 paragraphes directs>","strengths":["<f1>","<f2>","<f3>"],
-"advice":"<conseil 2 phrases>","tjm_suggest":"<TJM 500-900euro et pourquoi>"}}
+"advice":"<conseil 2 phrases>","tjm_suggest":"<TJM {tjm_min}-{tjm_max}€ et pourquoi>"}}
 Max 5 experiences triees pertinence. JSON seul.""", 1800)
     pdf_bytes = await generate_cv_pdf(r, r.get("title_adapted","")) if req.generate_pdf else b""
     pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
@@ -1561,30 +1982,34 @@ class PostReq(BaseModel):
 @app.post("/api/linkedin/generate", tags=["LinkedIn Studio"])
 async def gen_post(req: PostReq, request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "gen_post", 20, 3600)
-    _rate_limit(request, max_calls=20, window_seconds=3600)  # 20 fois/heure
-    content = await ask(f"""Tu es Sekouna KABA, Data Architect/Engineer Senior freelance.
-Missions récentes : SACEM (Data Architect), Thales Group (Senior Data Engineer), Accor (Data Platform).
+    _rate_limit(request, max_calls=20, window_seconds=3600)
+    name  = PROFILE.get("name","Consultant")
+    title = PROFILE.get("title","Consultant Senior")
+    exps  = PROFILE.get("experiences",[])
+    recent = ", ".join([e["company"] for e in exps[:3]]) if exps else "mes missions récentes"
+    sector = PROFILE.get("sector","Tech")
+    content = await ask(f"""Tu es {name}, {title} freelance ({recent}).
 {json.dumps(PROFILE)}
 
 Ecris un post LinkedIn VIRAL en français.
 Sujet: {req.topic}
 Format demandé: {req.format}
 Ton: {req.tone}
+Secteur: {sector}
 {f'Angle spécifique: {req.angle}' if req.angle else ''}
 
 STRUCTURE VIRALE OBLIGATOIRE:
 — Ligne 1 : hook IRRÉSISTIBLE (max 12 mots) qui force le clic "voir plus"
   Types de hooks qui marchent: chiffre choc, question provocatrice, confession, prise de position tranchée
-  Ex: "J'ai failli rater une mission à 850€/j à cause de ça."
 — Ligne 2 : vide
-— Corps : histoire concrète avec tes missions réelles + métriques précises (volumétrie, durée, impact)
+— Corps : histoire concrète avec les missions réelles du profil + métriques précises
   Sauts de ligne fréquents — 1-2 phrases par paragraphe max
-— Fin : question qui APPELLE les commentaires ("Et vous, vous faites comment ?") OU CTA fort
-— 4-6 emojis positionnés stratégiquement (pas en début de chaque phrase)
-— 6-8 hashtags pertinents en toute fin sur une ligne
+— Fin : question qui APPELLE les commentaires OU CTA fort
+— 4-6 emojis positionnés stratégiquement
+— 6-8 hashtags pertinents en toute fin
 — 200-260 mots au total
 
-TON: expert accessible, direct, authentique — pas corporate, pas lisse
+TON: expert accessible, direct, authentique
 UNIQUEMENT le texte du post, rien d'autre.""", 1000)
     with db_conn() as conn:
         db_exec(conn,
@@ -1626,12 +2051,16 @@ class TJMReq(BaseModel):
 @app.post("/api/tjm/analyze", tags=["TJM Optimizer"])
 async def analyze_tjm(request: Request, req: TJMReq, _=Depends(verify_api_key)):
     _check_rate(request, "analyze_tjm", 15, 3600)
-    r = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior freelance. TJM 500-900euro.{json.dumps(PROFILE)}
-Contexte:{req.context or "Mission generale Data Engineer Senior/Architect full remote"}
-JSON:{{"tjm_market":<median>,"tjm_top":<top>,"tjm_recommend":<500-900>,"summary":"<2 phrases>",
+    name=PROFILE.get("name","Consultant"); title=PROFILE.get("title","Consultant Senior")
+    tjm_min=PROFILE.get("tjm_min",300); tjm_max=PROFILE.get("tjm_max",900)
+    sector=PROFILE.get("sector","Tech")
+    r = await ask_json(f"""{name} — {title} freelance. TJM {tjm_min}-{tjm_max}€. Secteur: {sector}.
+{json.dumps(PROFILE)}
+Contexte:{req.context or f"Mission générale {title} full remote"}
+JSON:{{"tjm_market":<median>,"tjm_top":<top>,"tjm_recommend":<{tjm_min}-{tjm_max}>,"summary":"<2 phrases>",
 "value_drivers":["<v1>","<v2>","<v3>"],"negotiation_script":"<script 150 mots>",
 "skills_premium":["<s1>","<s2>","<s3>"],
-"benchmark":[{{"role":"Data Engineer","tjm":640}},{{"role":"Data Architect","tjm":730}},{{"role":"Lead Data Engineer","tjm":770}}]}}
+"benchmark":[{{"role":"<r1>","tjm":<n>}},{{"role":"<r2>","tjm":<n>}},{{"role":"<r3>","tjm":<n>}}]}}
 JSON seul.""", 1400)
     log_act("💰", f"TJM: recommande {r.get('tjm_recommend','?')}euro/j", "tjm")
     return r
