@@ -113,7 +113,6 @@ APIFY_TOKEN          = os.getenv("APIFY_TOKEN", "")
 PUSHOVER_TOKEN       = os.getenv("PUSHOVER_TOKEN", "")
 PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
 HUNTER_API_KEY       = os.getenv("HUNTER_API_KEY", "")   # hunter.io — 100 recherches/mois gratuit
-PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
 DASHBOARD_URL        = os.getenv("DASHBOARD_URL", "https://datalinkedai.onrender.com/dashboard")
 
 PH        = "%s" if USE_POSTGRES else "?"
@@ -866,11 +865,14 @@ async def get_offers_today() -> list:
 async def run_copilot():
     logger.info("Copilot démarré...")
     now_str    = datetime.now().strftime("%A %d %B")
+    _copilot_status["step"] = "Récupération des offres…"
     raw_offers = await get_offers_today()
     analyzed, auto_applied = [], 0
+    total = len(raw_offers)
 
-    for raw in raw_offers:
+    for idx, raw in enumerate(raw_offers):
         try:
+            _copilot_status["step"] = f"Analyse offre {idx+1}/{total}: {raw.get('title','')[:40]}…"
             result = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior freelance, TJM 500-900euro.
 Profil: {json.dumps(PROFILE)}
 Offre: {raw['description']}
@@ -906,6 +908,7 @@ JSON seul.""", 600,
 
     analyzed.sort(key=lambda x: x.get("match_score", 0), reverse=True)
     top3  = analyzed[:3]
+    _copilot_status["step"] = "Génération du post LinkedIn…"
     topic = random.choice([
         "Snowflake vs Databricks", "dbt Core en production", "Architecture Medallion en pratique",
         "PySpark optimisation avancée", "Kafka streaming temps réel", "TJM Freelance Data — comment négocier",
@@ -1279,7 +1282,7 @@ async def parse_gmail_replies() -> dict:
             mail.logout()
             return matched_ids
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         matched = await loop.run_in_executor(None, _imap_scan)
 
         for app_id, offer_title, reply_subject in matched:
@@ -1377,7 +1380,7 @@ JSON seul.""", 1200)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("=" * 60)
-    logger.info("DataLinkedAI v5.0 — Démarrage")
+    logger.info("DataLinkedAI v8.0 — Démarrage")
     logger.info(f"  IA        : {AI_PROVIDER} / {AI_MODEL or 'non configuré'}")
     logger.info(f"  DB        : {'PostgreSQL Supabase' if USE_POSTGRES else 'SQLite /tmp (non persistant)'}")
     logger.info(f"  Email     : {EMAIL_PROVIDER}")
@@ -1403,9 +1406,9 @@ async def lifespan(app: FastAPI):
     logger.info("DataLinkedAI arrêté proprement.")
 
 app = FastAPI(
-    title="DataLinkedAI API v5.0",
+    title="DataLinkedAI API v8.0",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
-    version="5.0.0",
+    version="8.0.0",
     lifespan=lifespan,
     dependencies=[Depends(verify_api_key)],
 )
@@ -1426,7 +1429,7 @@ async def dashboard_ui():
 @app.get("/health", tags=["Système"])
 async def health():
     return {
-        "status": "ok", "version": "5.0.0",
+        "status": "ok", "version": "8.0.0",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
@@ -1848,31 +1851,58 @@ async def trigger_copilot(bt: BackgroundTasks, _=Depends(verify_api_key)):
     return {"status": "started", "mode": "apify" if APIFY_TOKEN else "mock",
             "message": "Le copilot tourne en arrière-plan. Vérifie /api/copilot/history dans 60s."}
 
-@app.post("/api/copilot/run/sync", tags=["Copilot Quotidien"])
-async def trigger_copilot_sync(request: Request, _=Depends(verify_api_key)):
-    """Lance le copilot en mode synchrone. Timeout 120s pour les offres mockées, 300s avec Apify."""
-    _check_rate(request, "trigger_copilot_sync", 3, 3600)
-    timeout_sec = 300 if APIFY_TOKEN else 120
+# ── État en mémoire du copilot (singleton process) ────────────────────────
+_copilot_status: dict = {
+    "running": False, "step": "idle", "started_at": None,
+    "result": None, "error": None,
+}
+
+async def _run_copilot_tracked():
+    """Wrapper autour de run_copilot() qui met à jour _copilot_status."""
+    _copilot_status["running"] = True
+    _copilot_status["step"] = "Récupération des offres…"
+    _copilot_status["error"] = None
+    _copilot_status["result"] = None
     try:
-        result = await asyncio.wait_for(run_copilot(), timeout=timeout_sec)
-        return result
-    except asyncio.TimeoutError:
-        logger.error(f"Copilot sync timeout après {timeout_sec}s")
-        raise HTTPException(504, {
-            "error": "Copilot timeout",
-            "message": f"Le copilot a dépassé {timeout_sec}s. Les offres ont peut-être été partiellement analysées.",
-            "hint": "Lance /api/copilot/run (async en background) pour éviter le timeout.",
-            "dashboard": "/dashboard"
-        })
-    except HTTPException:
-        raise
+        result = await run_copilot()
+        _copilot_status["result"] = result
+        _copilot_status["step"] = "Terminé ✅"
     except Exception as e:
-        logger.error(f"Copilot sync crash: {e}", exc_info=True)
-        raise HTTPException(500, {
-            "error": str(type(e).__name__),
-            "message": str(e),
-            "hint": "Vérifie GROQ_API_KEY dans les variables d'env Render. Lance /health pour diagnostiquer.",
-        })
+        logger.error(f"Copilot tracked crash: {e}", exc_info=True)
+        _copilot_status["error"] = str(e)
+        _copilot_status["step"] = "Erreur ❌"
+    finally:
+        _copilot_status["running"] = False
+
+@app.post("/api/copilot/run/sync", tags=["Copilot Quotidien"])
+async def trigger_copilot_sync(request: Request, bt: BackgroundTasks, _=Depends(verify_api_key)):
+    """Lance le copilot en arrière-plan (évite timeout Render 30s).
+    Poll /api/copilot/status pour suivre la progression en temps réel.
+    """
+    _check_rate(request, "trigger_copilot_sync", 3, 3600)
+    if _copilot_status["running"]:
+        return {
+            "status": "already_running",
+            "message": "Un copilot est déjà en cours. Attends la fin avant de relancer.",
+            "poll_url": "/api/copilot/status",
+        }
+    _copilot_status["running"] = True
+    _copilot_status["started_at"] = datetime.now().isoformat()
+    _copilot_status["step"] = "Démarrage…"
+    _copilot_status["result"] = None
+    _copilot_status["error"] = None
+    bt.add_task(_run_copilot_tracked)
+    return {
+        "status": "started",
+        "message": "Copilot lancé en arrière-plan. Poll /api/copilot/status pour suivre.",
+        "poll_url": "/api/copilot/status",
+        "mode": "apify" if APIFY_TOKEN else "mock",
+    }
+
+@app.get("/api/copilot/status", tags=["Copilot Quotidien"])
+async def copilot_status_ep(_=Depends(verify_api_key)):
+    """Retourne l'état en temps réel du dernier run copilot (polling frontend)."""
+    return _copilot_status
 
 @app.get("/api/copilot/history", tags=["Copilot Quotidien"])
 async def copilot_history(_=Depends(verify_api_key)):

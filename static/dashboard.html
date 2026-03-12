@@ -179,7 +179,7 @@ textarea{min-height:90px}
 <aside id="sidebar">
   <div class="sb-logo">
     <div class="sb-logo-mark">DL</div>
-    <div class="sb-logo-text">DataLinkedAI <span>v2.0 PROD</span></div>
+    <div class="sb-logo-text">DataLinkedAI <span>v8.0 PROD</span></div>
   </div>
   <nav>
     <div class="nav-section">Vue générale</div>
@@ -890,30 +890,86 @@ async function runCopilot() {
   const btn = document.getElementById('btn-copilot-run');
   const out = document.getElementById('copilot-output');
   btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Analyse en cours (~30s)...';
-  out.innerHTML = '<div style="color:var(--dim);font-size:.8rem">⏳ Analyse des offres, génération post LinkedIn, envoi digest...</div>';
+  btn.innerHTML = '<div class="spinner"></div> Lancement…';
+  out.innerHTML = '<div style="color:var(--dim);font-size:.8rem">⏳ Démarrage du copilot en arrière-plan…</div>';
+
   try {
-    const r = await api('POST', '/api/copilot/run/sync');
-    out.innerHTML = `
-      <div class="card" style="margin-top:0">
-        <div class="three-col" style="margin-bottom:1rem">
-          <div><div class="stat-label">OFFRES ANALYSÉES</div><div class="stat-value" style="font-size:1.5rem">${r.offers_analyzed}</div></div>
-          <div><div class="stat-label">AUTO-POSTULÉES</div><div class="stat-value" style="font-size:1.5rem">${r.auto_applied}</div></div>
-          <div><div class="stat-label">DIGEST ENVOYÉ</div><div class="stat-value" style="font-size:1.5rem">${r.digest_sent ? '✅' : '❌'}</div></div>
-        </div>
-        ${r.top_offers ? r.top_offers.map(o => offerRow(o)).join('') : ''}
-        <div style="margin-top:.75rem;font-size:.75rem;color:var(--dim);font-family:var(--font-mono)">
-          Post LinkedIn généré . Sujet: ${r.post_topic} . Mode: ${r.scraping}
-        </div>
-      </div>`;
-    toast('Copilot terminé ! ' + r.offers_analyzed + ' offres analysées.', 'success');
-    loadCopilotHistory();
+    // Lance en background (évite le timeout 30s de Render)
+    const launch = await api('POST', '/api/copilot/run/sync');
+
+    if (launch.status === 'already_running') {
+      out.innerHTML = `<div style="color:var(--amber);font-size:.82rem">⚠️ Un copilot tourne déjà. Attends la fin avant de relancer.</div>`;
+      btn.disabled = false;
+      btn.innerHTML = '🚀 Lancer maintenant';
+      return;
+    }
+
+    // Polling toutes les 3s jusqu'à la fin
+    const steps = [
+      'Récupération des offres…',
+      'Analyse IA en cours…',
+      'Génération post LinkedIn…',
+      'Envoi digest email…',
+      'Finalisation…',
+    ];
+    let stepIdx = 0;
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await api('GET', '/api/copilot/status');
+        const step = status.step || steps[stepIdx % steps.length];
+        out.innerHTML = `
+          <div style="background:var(--blue-soft);border-radius:8px;padding:.75rem 1rem;font-size:.82rem;color:var(--blue)">
+            <div class="spinner" style="display:inline-block;margin-right:.4rem"></div>
+            ${step}
+          </div>`;
+        stepIdx++;
+
+        if (!status.running) {
+          clearInterval(pollInterval);
+          if (status.error) {
+            out.innerHTML = `<div style="color:var(--red);font-size:.82rem;background:var(--red-soft);padding:.75rem;border-radius:8px">
+              ❌ Erreur: ${status.error}<br>
+              <span style="font-size:.75rem;color:var(--dim)">Vérifie GROQ_API_KEY dans les variables d'env Render.</span>
+            </div>`;
+            toast('Erreur Copilot', 'error');
+          } else if (status.result) {
+            const r = status.result;
+            out.innerHTML = `
+              <div class="card" style="margin-top:0">
+                <div class="three-col" style="margin-bottom:1rem">
+                  <div><div class="stat-label">OFFRES ANALYSÉES</div><div class="stat-value" style="font-size:1.5rem">${r.offers_analyzed}</div></div>
+                  <div><div class="stat-label">AUTO-POSTULÉES</div><div class="stat-value" style="font-size:1.5rem">${r.auto_applied}</div></div>
+                  <div><div class="stat-label">DIGEST ENVOYÉ</div><div class="stat-value" style="font-size:1.5rem">${r.digest_sent ? '✅' : '❌'}</div></div>
+                </div>
+                ${r.top_offers ? r.top_offers.map(o => offerRow(o)).join('') : ''}
+                <div style="margin-top:.75rem;font-size:.75rem;color:var(--dim);font-family:var(--font-mono)">
+                  Post LinkedIn généré · Sujet: ${r.post_topic} · Mode: ${r.scraping}
+                </div>
+              </div>`;
+            toast('Copilot terminé ! ' + r.offers_analyzed + ' offres analysées.', 'success');
+            loadCopilotHistory();
+          }
+          btn.disabled = false;
+          btn.innerHTML = '🚀 Lancer maintenant';
+        }
+      } catch(pollErr) {
+        // silently ignore poll errors, retry next tick
+      }
+    }, 3000);
+
+    // Safety: stop polling after 10min
+    setTimeout(() => {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.innerHTML = '🚀 Lancer maintenant';
+    }, 600000);
+
   } catch(e) {
-    out.innerHTML = `<div style="color:var(--red);font-size:.8rem">❌ Erreur: ${e.message}</div>`;
+    out.innerHTML = `<div style="color:var(--red);font-size:.82rem;background:var(--red-soft);padding:.75rem;border-radius:8px">❌ ${e.message}</div>`;
     toast('Erreur Copilot', 'error');
+    btn.disabled = false;
+    btn.innerHTML = '🚀 Lancer maintenant';
   }
-  btn.disabled = false;
-  btn.innerHTML = '🚀 Lancer maintenant';
 }
 
 async function scanGmail() {
