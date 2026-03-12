@@ -431,43 +431,79 @@ textarea{min-height:90px}
      PAGE: LINKEDIN
 ════════════════════════════════════ -->
 <div class="page" id="page-linkedin">
-  <div class="section-header"><h2>💼 LinkedIn Studio</h2></div>
+  <div class="section-header">
+    <h2>💼 LinkedIn Studio</h2>
+    <div id="li-status-chip" style="font-size:.72rem;padding:.25rem .75rem;border-radius:100px;font-family:var(--font-mono);background:var(--border);color:var(--dim)">⏳ Chargement...</div>
+  </div>
   <div class="tab-buttons">
     <button class="tab-btn active" onclick="showTab('linkedin','generate')">✍️ Générer</button>
-    <button class="tab-btn" onclick="showTab('linkedin','posts')">📚 Posts sauvegardés</button>
+    <button class="tab-btn" onclick="showTab('linkedin','posts');loadPosts()">📚 Posts sauvegardés</button>
+    <button class="tab-btn" onclick="showTab('linkedin','schedule');loadLinkedInSchedule()">📅 Calendrier</button>
   </div>
+
+  <!-- TAB: GÉNÉRER ─────────────────────────────── -->
   <div class="tab-panel active" id="tab-linkedin-generate">
     <div class="card">
-      <h3>✍️ Générer un post</h3>
+      <h3>✍️ Générer un post viral</h3>
       <div class="form-grid">
         <div class="form-row"><label>Sujet</label>
-          <select id="post-topic">
-            <option>Snowflake</option><option>DBT Core</option><option>Medallion Architecture</option>
-            <option>Apache Airflow</option><option>PySpark</option><option>Kafka</option>
-            <option>TJM Freelance Data</option><option>AWS Data</option><option>Azure Lakehouse</option>
-            <option>GCP BigQuery</option><option>Retour de mission</option><option>Tips Data Engineer</option>
-          </select>
+          <input type="text" id="post-topic" placeholder="Ex: Mon erreur en mission Snowflake, TJM Freelance, Airflow vs Prefect...">
         </div>
         <div class="form-row"><label>Format</label>
           <select id="post-format">
             <option>Opinion tranchée</option><option>Retour d'expérience mission</option>
             <option>How-to pratique</option><option>Thread pédagogique</option>
             <option>Controverse du secteur</option><option>Liste de tips</option>
+            <option>Confession professionnelle</option><option>Hook choc + histoire</option>
           </select>
         </div>
         <div class="form-row"><label>Ton</label>
-          <select id="post-tone"><option value="expert">Expert senior</option><option value="pedagogique">Pédagogique</option><option value="direct">Direct et direct</option></select>
+          <select id="post-tone">
+            <option value="expert">Expert senior</option>
+            <option value="pedagogique">Pédagogique</option>
+            <option value="direct">Direct et percutant</option>
+            <option value="humour">Décalé / Humour</option>
+          </select>
         </div>
         <div class="form-row"><label>Angle spécifique (optionnel)</label>
-          <input type="text" id="post-angle" placeholder="ex: focus performance, focus coût cloud...">
+          <input type="text" id="post-angle" placeholder="focus performance, coût cloud, expérience client...">
         </div>
       </div>
-      <button class="btn btn-primary" onclick="genPost()">✨ Générer le post</button>
+      <div style="display:flex;gap:.65rem;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="genPost()">✨ Générer le post</button>
+        <button class="btn btn-secondary" onclick="genPostFromSector()">🎯 Sujet auto (secteur)</button>
+      </div>
     </div>
     <div id="post-result"></div>
   </div>
+
+  <!-- TAB: POSTS SAUVEGARDÉS ───────────────────── -->
   <div class="tab-panel" id="tab-linkedin-posts">
     <div id="posts-list"></div>
+  </div>
+
+  <!-- TAB: CALENDRIER ÉDITORIAL ───────────────── -->
+  <div class="tab-panel" id="tab-linkedin-schedule">
+    <div class="card" style="margin-bottom:1rem">
+      <h3>📅 Planifier un post</h3>
+      <div class="form-grid">
+        <div class="form-row"><label>Contenu du post</label>
+          <textarea id="sched-content" rows="4" placeholder="Colle ici le texte du post ou génère-en un dans l'onglet Générer..."></textarea>
+        </div>
+        <div class="form-row"><label>Sujet / label</label>
+          <input type="text" id="sched-topic" placeholder="Label interne...">
+        </div>
+        <div class="form-row"><label>Date et heure de publication</label>
+          <input type="datetime-local" id="sched-datetime">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="schedulePost()">📅 Planifier</button>
+      <p style="font-size:.75rem;color:var(--dim);margin-top:.5rem">
+        La publication est automatique si <code>LINKEDIN_AUTO_POST=true</code> est configuré.
+        Sinon le post passera en Validation avant envoi.
+      </p>
+    </div>
+    <div id="schedule-list"></div>
   </div>
 </div>
 
@@ -669,57 +705,89 @@ textarea{min-height:90px}
       <div id="health-output" class="output" style="min-height:150px"></div>
     </div>
   </div>
-  <div class="card">
-    <h3>📖 Variables d'environnement Railway</h3>
-    <div class="output code">OPENAI_API_KEY=sk-...          # IA principale (GPT-4o)
-ANTHROPIC_API_KEY=sk-ant-...   # Alternative Claude Sonnet
 
-API_KEY=mon-secret-2025        # Sécurité endpoints (OBLIGATOIRE)
-
-DATABASE_URL=postgresql://postgres:[PASS]@db.[REF].supabase.co:5432/postgres
-                               # Supabase → données persistantes
-
-RESEND_API_KEY=re_...          # Envoi email (3000/mois gratuit)
-GMAIL_USER=kaba.sekouna@gmail.com
-GMAIL_APP_PASS=xxxx xxxx xxxx  # Mot de passe d'application Gmail
-
-APIFY_TOKEN=apify_api_...      # Scraping offres réelles
-COPILOT_EMAIL=kaba.sekouna@gmail.com
-COPILOT_HOUR=8                 # Heure exécution copilot (0-23)
-
-AUTO_APPLY=false               # true = envoie automatiquement
-AUTO_APPLY_MIN_SCORE=85        # Score minimum pour postuler auto
-FOLLOWUP_DAYS=5                # Jours avant relance auto</div>
+  <!-- LinkedIn OAuth -->
+  <div class="card" style="border-color:#0077B5;background:linear-gradient(135deg,rgba(0,119,181,.04),white)">
+    <h3>💼 LinkedIn — Publication Automatique</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:1rem">Configure ton token LinkedIn pour que les posts soient publiés automatiquement sur ton profil après validation. <strong>Sans ça</strong>, les posts s'affichent dans la validation pour copier-coller manuellement.</p>
+    <div id="linkedin-status-banner" style="margin-bottom:1rem"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Access Token LinkedIn (60 jours)</label>
+        <input type="text" id="cfg-li-token" placeholder="AQV...xxxx">
+      </div>
+      <div class="form-row"><label>Person ID LinkedIn (ex: ABC123xyz)</label>
+        <input type="text" id="cfg-li-pid" placeholder="ABC123xyz">
+      </div>
+    </div>
+    <div style="display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin-top:.5rem">
+      <button class="btn btn-primary" style="background:#0077B5;border-color:#0077B5" onclick="saveLinkedInToken()">💾 Sauvegarder le token</button>
+      <button class="btn btn-secondary btn-sm" onclick="testLinkedInToken()">🔍 Tester la connexion</button>
+    </div>
+    <div id="li-token-output" style="margin-top:.75rem;font-size:.8rem"></div>
+    <details style="margin-top:1rem">
+      <summary style="cursor:pointer;font-size:.78rem;color:var(--blue);font-weight:600">📖 Comment obtenir ton token LinkedIn ?</summary>
+      <div class="output" style="margin-top:.5rem;font-size:.75rem;line-height:1.8">
+1. Va sur https://www.linkedin.com/developers/apps → Create App
+2. Permissions requises : w_member_social (pour publier)
+3. Dans "Auth" → génère un Access Token via OAuth 2.0
+4. Ton Person ID : va sur ton profil LinkedIn → inspecte l'URL API
+   ou utilise : GET https://api.linkedin.com/v2/me (avec le token)
+   → le champ "id" est ton Person ID
+5. Colle le token + Person ID ci-dessus → Sauvegarder
+6. Active LINKEDIN_AUTO_POST=true dans Railway pour la publication auto
+✅ Posts publiés automatiquement après validation !</div>
+    </details>
   </div>
-  <div class="two-col">
-    <div class="card">
-      <h3>🗄️ Supabase — Étapes</h3>
-      <div class="output" style="font-size:.78rem;line-height:1.9">
-1. Aller sur supabase.com → New project
-2. Nom : "datalinkedai" | Region : West EU (Paris)
-3. Mot de passe fort → Create project (2 min)
-4. Settings → Database → Connection String → URI
-5. Copier l'URL : postgresql://postgres:[PASS]@db.[REF].supabase.co:5432/postgres
-6. Remplacer [PASS] par ton mot de passe
-7. Coller dans Railway : DATABASE_URL = cette URL
-8. Redémarrer le service → vérifier /health
-✅ Données persistantes pour toujours !</div>
-    </div>
-    <div class="card">
-      <h3>🕷️ Apify — Étapes</h3>
-      <div class="output" style="font-size:.78rem;line-height:1.9">
-1. Aller sur apify.com → Sign up gratuit
-2. Settings → Integrations → API token
-3. Copier ton token : apify_api_xxxxx...
-4. Coller dans Railway : APIFY_TOKEN = ce token
-5. Redémarrer le service
-6. Tester : POST /api/copilot/run/sync
-7. Vérifier "scraping":"apify" dans la réponse
-✅ Vraies offres LinkedIn chaque matin à 8h !
 
-Note: Plan gratuit = 5$/mois de crédits.
-1 run copilot ≈ 0.05$ → 100 runs/mois gratuits.</div>
-    </div>
+  <!-- Scrapers -->
+  <div class="card">
+    <h3>🕷️ Sources de Scraping (×10)</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:1rem">Statuts en temps réel. Les sources en rouge ont échoué lors du dernier run.</p>
+    <div id="scraper-stats-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.5rem;margin-bottom:1rem"></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadScraperStats()">🔄 Actualiser</button>
+    <button class="btn btn-secondary btn-sm" onclick="runScraperNow()" style="margin-left:.5rem">▶ Lancer un scraping test</button>
+    <div id="scraper-run-output" style="margin-top:.75rem;font-size:.8rem"></div>
+  </div>
+
+  <div class="card">
+    <h3>📖 Variables d'environnement Railway / Railway</h3>
+    <div class="output code">
+# ── IA (obligatoire : au moins une) ─────────────────────────────────
+GROQ_API_KEY=gsk_...             # Gratuit, rapide — groq.com
+OPENAI_API_KEY=sk-...            # GPT-4o
+ANTHROPIC_API_KEY=sk-ant-...     # Claude Sonnet
+
+# ── Sécurité ─────────────────────────────────────────────────────────
+API_KEY=mon-secret-2025          # OBLIGATOIRE
+
+# ── Base de données ───────────────────────────────────────────────────
+DATABASE_URL=postgresql://postgres:[PASS]@db.[REF].supabase.co:5432/postgres
+
+# ── Email ────────────────────────────────────────────────────────────
+RESEND_API_KEY=re_...            # Gratuit 3000/mois
+GMAIL_USER=toi@gmail.com
+GMAIL_APP_PASS=xxxx xxxx xxxx
+
+# ── LinkedIn (publication auto) ────────────────────────────────────
+LINKEDIN_ACCESS_TOKEN=AQV...     # Token OAuth 60j
+LINKEDIN_PERSON_ID=ABC123xyz     # Ton ID LinkedIn
+LINKEDIN_AUTO_POST=true          # false = validation manuelle avant post
+LINKEDIN_POST_HOUR=9             # Heure de publication (9h par défaut)
+LINKEDIN_POST_DAYS=mon,wed,fri   # Jours de publication
+
+# ── Scraping ─────────────────────────────────────────────────────────
+APIFY_TOKEN=apify_api_...        # Optionnel — remplace les 10 scrapers
+ADZUNA_APP_ID=xxxxxx             # Optionnel — adzuna.com (gratuit)
+ADZUNA_APP_KEY=xxxxxxxxxxxxxx
+SCRAPERS_ENABLED=wttj,indeed,remotive,freelance_com,adzuna,jobijoba,france_travail,hellowork,linkedin,remoteok
+
+# ── Copilot ──────────────────────────────────────────────────────────
+COPILOT_EMAIL=toi@email.com
+COPILOT_HOUR=8
+AUTO_APPLY=false
+AUTO_APPLY_MIN_SCORE=85
+FOLLOWUP_DAYS=5
+HUNTER_API_KEY=...               # hunter.io — enrichissement email recruteur</div>
   </div>
 </div>
 
@@ -1805,39 +1873,293 @@ async function genPost() {
       angle:  document.getElementById('post-angle').value
     });
     const postClipId = clipStore(r.content);
+    // Pré-remplir l'onglet planification
+    document.getElementById('sched-content').value = r.content;
+    document.getElementById('sched-topic').value   = document.getElementById('post-topic').value;
+    // Suggérer demain à 9h
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1); tomorrow.setHours(9,0,0,0);
+    document.getElementById('sched-datetime').value = tomorrow.toISOString().slice(0,16);
+
     document.getElementById('post-result').innerHTML = `
       <div class="card">
-        <h3>✅ Post généré</h3>
-        <div class="output" style="white-space:pre-wrap">${r.content}</div>
-        <div class="btn-row">
-          <button class="btn btn-primary btn-sm" onclick="clipCopy('${postClipId}')">📋 Copier le texte</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem">
+          <h3>✅ Post généré</h3>
+          <span class="badge badge-green">Prêt à publier</span>
         </div>
-      </div>
-      ${buildArchImageBlock(r.topic || document.getElementById('post-topic').value, r.content)}`;
+        <div class="output" style="white-space:pre-wrap;margin-bottom:1rem">${r.content}</div>
+        <div class="btn-row" style="flex-wrap:wrap;gap:.5rem">
+          <button class="btn btn-primary btn-sm" onclick="clipCopy('${postClipId}')">📋 Copier</button>
+          <button class="btn btn-secondary btn-sm" style="background:#0077B5;color:#fff;border-color:#0077B5" onclick="publishNow(this,'${postClipId}')">🚀 Publier maintenant sur LinkedIn</button>
+          <button class="btn btn-secondary btn-sm" onclick="showTab('linkedin','schedule');loadLinkedInSchedule()">📅 Planifier</button>
+        </div>
+      </div>`;
     toast('Post LinkedIn généré !', 'success');
     loadPosts();
+    loadLinkedInStatus();
   } catch(e) { toast('Erreur: ' + e.message, 'error'); }
   btn.disabled = false; btn.innerHTML = '✨ Générer le post';
+}
+
+async function genPostFromSector() {
+  // Génère avec un sujet auto basé sur le secteur du profil
+  const btn = event.currentTarget;
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>...';
+  try {
+    const sectors = await api('GET', '/api/sectors');
+    const sector  = sectors.current_sector || 'Data & Tech';
+    const preset  = (sectors.presets || {})[sector] || {};
+    const topics  = ['Mon expertise en 2025', 'Freelance conseils pratiques'];
+    const sectorTopics = preset.post_topics || topics;
+    // Pick random
+    const topic = sectorTopics[Math.floor(Math.random() * sectorTopics.length)];
+    document.getElementById('post-topic').value = topic;
+    toast(`Sujet sélectionné: ${topic}`, 'success');
+  } catch(e) {}
+  btn.disabled = false; btn.innerHTML = '🎯 Sujet auto (secteur)';
+}
+
+async function publishNow(btn, clipId) {
+  const content = _clipStore[clipId];
+  if (!content) { toast('Contenu introuvable', 'error'); return; }
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Publication...';
+  try {
+    const r = await api('POST', '/api/linkedin/publish', {
+      content, topic: document.getElementById('post-topic')?.value || ''
+    });
+    if (r.success) {
+      toast('✅ Publié sur LinkedIn !', 'success');
+      btn.innerHTML = '✅ Publié !';
+      btn.style.background = 'var(--green)';
+      loadLinkedInStatus();
+    } else {
+      toast('LinkedIn: ' + (r.error || 'Erreur inconnue'), 'error');
+      btn.disabled = false; btn.innerHTML = '🚀 Publier maintenant';
+    }
+  } catch(e) {
+    toast(e.message, 'error');
+    btn.disabled = false; btn.innerHTML = '🚀 Publier maintenant';
+  }
+}
+
+async function schedulePost() {
+  const content   = document.getElementById('sched-content').value.trim();
+  const topic     = document.getElementById('sched-topic').value.trim();
+  const datetime  = document.getElementById('sched-datetime').value;
+  if (!content) { toast('Contenu requis', 'error'); return; }
+  if (!datetime) { toast('Date/heure requise', 'error'); return; }
+  const btn = event.currentTarget;
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>...';
+  try {
+    const r = await api('POST', '/api/linkedin/schedule', {
+      content, topic, format: '', scheduled_at: new Date(datetime).toISOString()
+    });
+    toast(r.will_auto_publish ? '✅ Planifié — sera publié automatiquement !' : '✅ Planifié — passera en validation avant publication.', 'success');
+    document.getElementById('sched-content').value = '';
+    loadLinkedInSchedule();
+  } catch(e) { toast(e.message, 'error'); }
+  btn.disabled = false; btn.innerHTML = '📅 Planifier';
+}
+
+async function loadLinkedInSchedule() {
+  const container = document.getElementById('schedule-list');
+  if (!container) return;
+  try {
+    const rows = await api('GET', '/api/linkedin/schedule');
+    if (!rows.length) {
+      container.innerHTML = '<div class="empty"><div class="emoji">📅</div><p>Aucun post planifié</p></div>';
+      return;
+    }
+    const statusColors = {scheduled:'badge-amber',published:'badge-green',error:'badge-red',manual:'badge-blue'};
+    const statusLabels = {scheduled:'⏰ Planifié',published:'✅ Publié',error:'❌ Erreur',manual:'✋ Manuel'};
+    container.innerHTML = rows.map(r => {
+      const clip = clipStore(r.content);
+      return `<div class="card" style="margin-bottom:.65rem;padding:.85rem 1rem">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:.4rem;align-items:center;margin-bottom:.3rem;flex-wrap:wrap">
+              <span class="badge ${statusColors[r.status]||'badge-dim'}">${statusLabels[r.status]||r.status}</span>
+              ${r.topic ? `<span class="badge badge-blue">${r.topic}</span>` : ''}
+            </div>
+            <div style="font-size:.8rem;color:var(--ink2);line-height:1.5;max-height:60px;overflow:hidden">${r.content.replace(/\n/g,'<br>').slice(0,200)}...</div>
+            ${r.error ? `<div style="color:var(--red);font-size:.72rem;margin-top:.25rem">⚠️ ${r.error}</div>` : ''}
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:.68rem;font-family:var(--font-mono);color:var(--dim)">
+              ${r.status==='published' ? '✅ ' + fmtDate(r.published_at) : '⏰ ' + fmtDate(r.scheduled_at)}
+            </div>
+            <div style="display:flex;gap:.35rem;margin-top:.35rem;justify-content:flex-end;flex-wrap:wrap">
+              <button class="btn btn-secondary btn-sm" onclick="clipCopy('${clip}')">📋</button>
+              ${r.status!=='published' ? `<button class="btn btn-secondary btn-sm" style="background:#0077B5;color:#fff;border:none" onclick="publishScheduledNow('${r.id}','${clip}')">🚀</button>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    if (container) container.innerHTML = `<div style="color:var(--dim);padding:.5rem;font-size:.8rem">${e.message}</div>`;
+  }
+}
+
+async function publishScheduledNow(schedId, clipId) {
+  const content = _clipStore[clipId];
+  if (!content) return;
+  try {
+    const r = await api('POST', '/api/linkedin/publish', { content, topic: '' });
+    if (r.success) { toast('✅ Publié !', 'success'); loadLinkedInSchedule(); }
+    else toast('Erreur: ' + r.error, 'error');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function loadLinkedInStatus() {
+  try {
+    const s = await api('GET', '/api/linkedin/status');
+    const chip = document.getElementById('li-status-chip');
+    if (!chip) return;
+    if (s.token_configured && s.person_id_configured) {
+      chip.style.background = 'var(--green-soft)'; chip.style.color = 'var(--green)';
+      chip.textContent = s.auto_post_enabled ? `✅ Auto-post (${s.post_days} ${s.post_hour}h)` : '🔑 Token OK — Publication manuelle';
+    } else {
+      chip.style.background = 'var(--amber-soft)'; chip.style.color = 'var(--amber)';
+      chip.textContent = '⚠️ Token LinkedIn non configuré';
+    }
+  } catch(e) {}
 }
 
 async function loadPosts() {
   try {
     const rows = await api('GET', '/api/linkedin/posts');
     const el = document.getElementById('posts-list');
-    if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">💼</div><p>Aucun post</p></div>'; return; }
+    if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">💼</div><p>Aucun post généré</p></div>'; return; }
     el.innerHTML = rows.map(r => {
       const id = clipStore(r.content);
+      const statusColor = r.status==='published' ? 'badge-green' : 'badge-amber';
       return `
       <div class="card" style="margin-bottom:.75rem">
-        <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
-          <span class="badge badge-blue">${r.topic}</span>
+        <div style="display:flex;justify-content:space-between;margin-bottom:.5rem;flex-wrap:wrap;gap:.35rem">
+          <div style="display:flex;gap:.4rem;align-items:center">
+            <span class="badge badge-blue">${r.topic||'Post'}</span>
+            <span class="badge ${statusColor}">${r.status}</span>
+          </div>
           <span style="font-size:.68rem;color:var(--dim);font-family:var(--font-mono)">${fmtDate(r.created_at)}</span>
         </div>
         <div style="font-size:.8rem;color:var(--ink2);line-height:1.7;white-space:pre-wrap;max-height:120px;overflow:hidden">${r.content}</div>
-        <button class="btn btn-secondary btn-sm" style="margin-top:.5rem" onclick="clipCopy('${id}')">📋 Copier</button>
+        <div style="display:flex;gap:.4rem;margin-top:.65rem;flex-wrap:wrap">
+          <button class="btn btn-secondary btn-sm" onclick="clipCopy('${id}')">📋 Copier</button>
+          <button class="btn btn-sm" style="background:#0077B5;color:#fff;border:none;padding:.3rem .7rem;border-radius:var(--radius-sm);cursor:pointer;font-size:.75rem" onclick="quickPublish('${id}')">🚀 Publier</button>
+          <button class="btn btn-secondary btn-sm" onclick="prefillSchedule('${id}')">📅 Planifier</button>
+        </div>
       </div>`;
     }).join('');
   } catch(e) {}
+}
+
+async function quickPublish(clipId) {
+  const content = _clipStore[clipId];
+  if (!content) { toast('Contenu introuvable', 'error'); return; }
+  try {
+    const r = await api('POST', '/api/linkedin/publish', { content });
+    if (r.success) { toast('✅ Publié sur LinkedIn !', 'success'); loadPosts(); loadLinkedInStatus(); }
+    else toast('Erreur LinkedIn: ' + r.error, 'error');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function prefillSchedule(clipId) {
+  const content = _clipStore[clipId];
+  if (content) {
+    document.getElementById('sched-content').value = content;
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1); tomorrow.setHours(9,0,0,0);
+    document.getElementById('sched-datetime').value = tomorrow.toISOString().slice(0,16);
+    showTab('linkedin','schedule');
+    loadLinkedInSchedule();
+    toast('Post pré-rempli dans le calendrier', 'success');
+  }
+}
+
+// -- CONFIG: LinkedIn token + Scrapers ─────────────────────────────
+async function saveLinkedInToken() {
+  const token = document.getElementById('cfg-li-token').value.trim();
+  const pid   = document.getElementById('cfg-li-pid').value.trim();
+  const out   = document.getElementById('li-token-output');
+  if (!token || !pid) { toast('Token et Person ID requis', 'error'); return; }
+  try {
+    const r = await api('POST', '/api/linkedin/token', { access_token: token, person_id: pid });
+    out.innerHTML = `<span style="color:var(--green)">✅ Token sauvegardé — Person ID: ${r.person_id}</span>`;
+    toast('Token LinkedIn sauvegardé !', 'success');
+    loadLinkedInStatusBanner();
+  } catch(e) {
+    out.innerHTML = `<span style="color:var(--red)">Erreur: ${e.message}</span>`;
+  }
+}
+
+async function testLinkedInToken() {
+  const out = document.getElementById('li-token-output');
+  try {
+    const s = await api('GET', '/api/linkedin/status');
+    if (s.token_configured && s.person_id_configured) {
+      out.innerHTML = `<span style="color:var(--green)">✅ Token OK — Auto-post: ${s.auto_post_enabled ? 'activé' : 'désactivé'} | Dernier post: ${s.last_published?.topic || 'aucun'}</span>`;
+    } else {
+      out.innerHTML = `<span style="color:var(--amber)">⚠️ Token: ${s.token_configured?'OK':'manquant'} | Person ID: ${s.person_id_configured?'OK':'manquant'}</span>`;
+    }
+  } catch(e) { out.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+async function loadLinkedInStatusBanner() {
+  try {
+    const s = await api('GET', '/api/linkedin/status');
+    const banner = document.getElementById('linkedin-status-banner');
+    if (!banner) return;
+    if (s.token_configured && s.person_id_configured) {
+      banner.innerHTML = `<div style="background:var(--green-soft);color:var(--green);padding:.6rem .9rem;border-radius:var(--radius-sm);font-size:.8rem;display:flex;gap:.5rem;align-items:center">
+        <span>✅</span><span>Connecté à LinkedIn — Publication ${s.auto_post_enabled?'automatique activée':'manuelle (LINKEDIN_AUTO_POST=false)'}. ${s.pending_scheduled} post(s) en attente.</span>
+      </div>`;
+    } else {
+      banner.innerHTML = `<div style="background:var(--amber-soft);color:var(--amber);padding:.6rem .9rem;border-radius:var(--radius-sm);font-size:.8rem">
+        ⚠️ LinkedIn non configuré — les posts seront affichés en validation pour copier-coller manuel.
+      </div>`;
+    }
+  } catch(e) {}
+}
+
+async function loadScraperStats() {
+  try {
+    const data = await api('GET', '/api/scrapers/stats');
+    const grid = document.getElementById('scraper-stats-grid');
+    if (!grid) return;
+    const sources = data.sources || [];
+    const enabled = new Set(data.enabled || []);
+    // Sources always shown (may have no data yet)
+    const ALL_SOURCES = ['wttj','indeed','remotive','freelance_com','adzuna','jobijoba','france_travail','hellowork','linkedin','remoteok'];
+    const displayed = ALL_SOURCES.map(s => sources.find(r=>r.source.toLowerCase().replace(' ','_')===s) || {source:s,runs:0,total_offers:0,avg_latency_ms:0,success_rate:100});
+    grid.innerHTML = displayed.map(s => {
+      const isEnabled = enabled.has(s.source.toLowerCase().replace(' ','_').replace('.','_'));
+      const hasData = s.runs > 0;
+      const bgColor = !hasData ? 'var(--bg)' : s.success_rate >= 80 ? 'var(--green-soft)' : s.success_rate >= 50 ? 'var(--amber-soft)' : 'var(--red-soft)';
+      const textColor = !hasData ? 'var(--dim)' : s.success_rate >= 80 ? 'var(--green)' : s.success_rate >= 50 ? 'var(--amber)' : 'var(--red)';
+      return `<div style="background:${bgColor};border-radius:var(--radius-sm);padding:.6rem .75rem;border:1px solid ${textColor}30">
+        <div style="font-size:.72rem;font-weight:700;color:var(--ink);margin-bottom:.15rem">${s.source}</div>
+        <div style="font-size:.65rem;color:${textColor};font-family:var(--font-mono)">${hasData ? `${s.total_offers} offres | ${s.success_rate}% OK | ${s.avg_latency_ms}ms` : isEnabled ? '→ Pas encore utilisé' : '⊘ Désactivé'}</div>
+      </div>`;
+    }).join('');
+    // Also update scraping chip in health
+    const sc = document.getElementById('sc-chip');
+    if (sc) { sc.textContent = `×10 scrapers (${data.enabled?.length||0} actifs)`; }
+  } catch(e) {}
+}
+
+async function runScraperNow() {
+  const btn = event.currentTarget;
+  const out = document.getElementById('scraper-run-output');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner dark"></div> Scraping en cours...';
+  out.innerHTML = '⏳ Interrogation des 10 sources...';
+  try {
+    const r = await api('GET', '/api/scrapers/run');
+    out.innerHTML = `<span style="color:var(--green)">✅ ${r.count} offres récupérées</span>`;
+    loadScraperStats();
+    toast(`Scraping: ${r.count} offres trouvées`, 'success');
+  } catch(e) {
+    out.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+  btn.disabled = false; btn.innerHTML = '▶ Lancer un scraping test';
 }
 
 // -- EMAIL ---------------------------------------------------------

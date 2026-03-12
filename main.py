@@ -99,7 +99,7 @@ GMAIL_APP_PASS  = os.getenv("GMAIL_APP_PASS", "")
 GMAIL_IMAP_HOST = "imap.gmail.com"
 GMAIL_IMAP_PORT = 993
 GMAIL_CHECK_REPLIES = os.getenv("GMAIL_CHECK_REPLIES", "true").lower() == "true"
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Sekouna KABA — Data Architect")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "")
 EMAIL_FROM_ADDR = os.getenv("EMAIL_FROM_ADDR", GMAIL_USER or "sekouna@datalinkedai.com")
 EMAIL_PROVIDER  = "resend" if RESEND_API_KEY else ("gmail" if GMAIL_USER and GMAIL_APP_PASS else "none")
 
@@ -108,12 +108,28 @@ COPILOT_HOUR         = int(os.getenv("COPILOT_HOUR", "8"))
 AUTO_APPLY_ENABLED   = os.getenv("AUTO_APPLY", "false").lower() == "true"
 AUTO_APPLY_MIN_SCORE = int(os.getenv("AUTO_APPLY_MIN_SCORE", "85"))
 FOLLOWUP_DAYS        = int(os.getenv("FOLLOWUP_DAYS", "5"))
-GMAIL_PARSE_ENABLED  = os.getenv("GMAIL_PARSE_ENABLED", "true").lower() == "true"  # Parsing réponses
+GMAIL_PARSE_ENABLED  = os.getenv("GMAIL_PARSE_ENABLED", "true").lower() == "true"
 APIFY_TOKEN          = os.getenv("APIFY_TOKEN", "")
 PUSHOVER_TOKEN       = os.getenv("PUSHOVER_TOKEN", "")
 PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
-HUNTER_API_KEY       = os.getenv("HUNTER_API_KEY", "")   # hunter.io — 100 recherches/mois gratuit
+HUNTER_API_KEY       = os.getenv("HUNTER_API_KEY", "")
 DASHBOARD_URL        = os.getenv("DASHBOARD_URL", "https://datalinkedai.onrender.com/dashboard")
+
+# ── LinkedIn OAuth (publication automatique) ────────────────────────
+LINKEDIN_CLIENT_ID     = os.getenv("LINKEDIN_CLIENT_ID", "")
+LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET", "")
+LINKEDIN_ACCESS_TOKEN  = os.getenv("LINKEDIN_ACCESS_TOKEN", "")   # token long-lived (60j)
+LINKEDIN_PERSON_ID     = os.getenv("LINKEDIN_PERSON_ID", "")      # urn:li:person:XXXXXX
+LINKEDIN_AUTO_POST     = os.getenv("LINKEDIN_AUTO_POST", "false").lower() == "true"
+LINKEDIN_POST_HOUR     = int(os.getenv("LINKEDIN_POST_HOUR", "9"))   # heure de publication auto
+LINKEDIN_POST_DAYS     = os.getenv("LINKEDIN_POST_DAYS", "mon,wed,fri")  # jours de publication
+
+# ── Scrapers supplémentaires ─────────────────────────────────────────
+ADZUNA_APP_ID  = os.getenv("ADZUNA_APP_ID", "")    # gratuit : adzuna.com/api
+ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY", "")
+SCRAPERS_ENABLED = os.getenv("SCRAPERS_ENABLED",
+    "wttj,indeed,remotive,freelance_com,adzuna,jobijoba,pole_emploi,hellowork,malt,comet,github_jobs"
+).split(",")   # désactiver un scraper : retirer son nom de la liste
 
 PH        = "%s" if USE_POSTGRES else "?"
 scheduler = AsyncIOScheduler(timezone="Europe/Paris")
@@ -352,8 +368,15 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Sessions de mock interview
         "CREATE TABLE IF NOT EXISTS interview_sessions(id SERIAL PRIMARY KEY,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        # Cache scraping (évite de re-scraper les mêmes offres le même jour)
+        # Cache scraping
         "CREATE TABLE IF NOT EXISTS scrape_cache(id SERIAL PRIMARY KEY,source TEXT,query_hash TEXT UNIQUE,results TEXT,scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # ── NOUVELLES TABLES v11 ──────────────────────────────────────────────
+        # Calendrier éditorial LinkedIn — posts planifiés
+        "CREATE TABLE IF NOT EXISTS linkedin_schedule(id SERIAL PRIMARY KEY,post_id INTEGER,content TEXT NOT NULL,topic TEXT,format TEXT,scheduled_at TIMESTAMP NOT NULL,published_at TIMESTAMP,status TEXT DEFAULT 'scheduled',linkedin_post_id TEXT,error TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # Statistiques des scrapers par source (succès, nb offres, latence)
+        "CREATE TABLE IF NOT EXISTS scraper_stats(id SERIAL PRIMARY KEY,source TEXT,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,offers_found INTEGER DEFAULT 0,latency_ms INTEGER DEFAULT 0,success INTEGER DEFAULT 1,error TEXT)",
+        # Token LinkedIn OAuth persisté en DB (survit aux redémarrages)
+        "CREATE TABLE IF NOT EXISTS linkedin_tokens(id INTEGER PRIMARY KEY DEFAULT 1,access_token TEXT,person_id TEXT,expires_at TEXT,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
     ]
     if not USE_POSTGRES:
         tables = [
@@ -580,7 +603,7 @@ def make_html_email(body_text: str) -> str:
   <div style="border-left:3px solid #1A56FF;padding-left:20px;margin-bottom:32px">{paras}</div>
   <hr style="border:none;border-top:1px solid #eee;margin:32px 0">
   <div style="font-size:13px;color:#666;line-height:1.6">
-    <strong>Sekouna KABA</strong><br>Data Engineer Senior — Data Architect | Freelance<br>
+    <strong>{cv_name}</strong><br>{cv_title}<br>
     TJM 500-900€/j · Full Remote · Ile-de-France<br>
     kaba.sekouna@gmail.com | +33 06 59 02 21 57
   </div>
@@ -908,154 +931,384 @@ def _build_mock_offers() -> list:
         })
     return mocks
 
-MOCK_OFFERS: list = []   # rempli dynamiquement après load_profile()
+MOCK_OFFERS: list = []  # rempli dynamiquement
 
 # ══════════════════════════════════════════════════════
-#  SCRAPERS GRATUITS — WTTJ · Indeed · Malt · RSS
+#  LINKEDIN — PUBLICATION AUTOMATIQUE VIA API
 # ══════════════════════════════════════════════════════
 
-async def scrape_wttj(queries: list[str]) -> list:
-    """Welcome To The Jungle — recherche via leur API publique (pas de clé requise)."""
+def _get_linkedin_token() -> tuple:
+    """Retourne (access_token, person_id) depuis DB ou variables d'env."""
+    try:
+        with db_conn() as conn:
+            row = db_exec(conn, "SELECT access_token, person_id FROM linkedin_tokens WHERE id=1").fetchone()
+            if row and row[0]:
+                return row[0], row[1] or LINKEDIN_PERSON_ID
+    except Exception:
+        pass
+    return LINKEDIN_ACCESS_TOKEN, LINKEDIN_PERSON_ID
+
+async def linkedin_publish(content: str) -> dict:
+    """Publie un post sur LinkedIn via l'API v2 UGC."""
+    access_token, person_id = _get_linkedin_token()
+    if not access_token or not person_id:
+        return {"success": False, "error": "LINKEDIN_ACCESS_TOKEN ou LINKEDIN_PERSON_ID manquant — configure dans ⚙️ Config."}
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
+    }
+    payload = {
+        "author": f"urn:li:person:{person_id}",
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {"text": content},
+                "shareMediaCategory": "NONE",
+            }
+        },
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as cl:
+            r = await cl.post("https://api.linkedin.com/v2/ugcPosts", headers=headers, json=payload)
+            if r.status_code in (200, 201):
+                post_id = r.headers.get("x-restli-id", r.json().get("id", ""))
+                logger.info(f"LinkedIn post publié: {post_id}")
+                return {"success": True, "post_id": post_id}
+            err = r.json().get("message", r.text[:200])
+            logger.error(f"LinkedIn API {r.status_code}: {err}")
+            return {"success": False, "error": f"{r.status_code}: {err}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+async def run_linkedin_scheduler():
+    """Tâche schedulée: publie les posts dont l'heure est passée."""
+    if not LINKEDIN_AUTO_POST:
+        return
+    now = datetime.now().isoformat()
+    try:
+        with db_conn() as conn:
+            due = db_exec(conn,
+                "SELECT id, content, topic FROM linkedin_schedule WHERE status='scheduled' AND scheduled_at <= ?",
+                (now,)).fetchall()
+        for row in due:
+            sched_id, content, topic = row
+            result = await linkedin_publish(content)
+            with db_conn() as conn:
+                if result["success"]:
+                    db_exec(conn,
+                        "UPDATE linkedin_schedule SET status='published', published_at=?, linkedin_post_id=? WHERE id=?",
+                        (datetime.now().isoformat(), result.get("post_id",""), sched_id))
+                    log_act("💼", f"Post LinkedIn publié auto: {topic}", "linkedin")
+                else:
+                    db_exec(conn,
+                        "UPDATE linkedin_schedule SET status='error', error=? WHERE id=?",
+                        (result["error"][:300], sched_id))
+    except Exception as e:
+        logger.error(f"run_linkedin_scheduler: {e}")
+
+def _schedule_linkedin_post(content: str, topic: str, fmt: str, delay_hours: int = 0) -> int:
+    """Enregistre un post pour publication automatique (ou manuelle si LINKEDIN_AUTO_POST=false)."""
+    publish_time = datetime.now() + timedelta(hours=delay_hours)
+    status = "scheduled" if LINKEDIN_AUTO_POST else "manual"
+    try:
+        with db_conn() as conn:
+            cur = db_insert(conn,
+                "INSERT INTO linkedin_schedule(content,topic,format,scheduled_at,status) VALUES(?,?,?,?,?)",
+                (content, topic, fmt, publish_time.isoformat(), status))
+            return cur.lastrowid
+    except Exception as e:
+        logger.error(f"_schedule_linkedin_post: {e}")
+        return 0
+
+# ══════════════════════════════════════════════════════
+#  SCRAPERS — 10 SOURCES EN PARALLÈLE
+# ══════════════════════════════════════════════════════
+
+_HDR = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "fr-FR,fr;q=0.9"}
+
+def _rss_parse(xml: str, source: str, max_items: int = 6) -> list:
+    """Parse générique RSS → liste d'offres."""
     offers = []
-    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
-        for q in queries[:2]:
+    for item in re.findall(r"<item>(.*?)</item>", xml, re.DOTALL)[:max_items]:
+        def _g(tag):
+            m = re.search(rf"<{tag}[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</{tag}>", item, re.DOTALL)
+            return re.sub(r"<[^>]+>", " ", m.group(1)).strip()[:600] if m else ""
+        t = _g("title"); url = _g("link"); desc = _g("description")
+        co_m = re.search(r"<source[^>]*>(.*?)</source>", item)
+        co = re.sub(r"<[^>]+>", "", co_m.group(1)).strip() if co_m else ""
+        if t: offers.append({"title": t, "company": co, "source": source,
+                             "url": url, "description": f"{t}. {desc}"[:800]})
+    return offers
+
+async def _timed(coro, source: str) -> list:
+    """Wrapper: exécute un scraper, mesure la latence, persiste les stats."""
+    t0 = time.time()
+    try:
+        result = await coro
+        ms = int((time.time() - t0) * 1000)
+        try:
+            with db_conn() as conn:
+                db_exec(conn,
+                    "INSERT INTO scraper_stats(source,offers_found,latency_ms,success) VALUES(?,?,?,1)",
+                    (source, len(result), ms))
+        except Exception: pass
+        return result
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        try:
+            with db_conn() as conn:
+                db_exec(conn,
+                    "INSERT INTO scraper_stats(source,offers_found,latency_ms,success,error) VALUES(?,0,?,0,?)",
+                    (source, ms, str(e)[:200]))
+        except Exception: pass
+        logger.debug(f"Scraper {source}: {e}")
+        return []
+
+# 1 — WTTJ ────────────────────────────────────────────
+async def _wttj(queries: list) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR) as cl:
+        for q in queries[:3]:
             try:
-                params = {"query": q, "page": 1, "per_page": 5, "contract_type[]": ["freelance", "contractor"]}
-                r = await cl.get("https://www.welcometothejungle.com/api/v1/jobs", params=params)
+                r = await cl.get("https://www.welcometothejungle.com/api/v1/jobs",
+                    params={"query": q, "page": 1, "per_page": 5})
                 if r.status_code == 200:
                     for job in r.json().get("jobs", [])[:5]:
-                        title   = job.get("name", "")
-                        company = job.get("company", {}).get("name", "")
-                        url     = f"https://www.welcometothejungle.com/fr/companies/{job.get('company',{}).get('slug','')}/jobs/{job.get('slug','')}"
-                        desc    = job.get("description", "") or f"{title} chez {company}"
-                        if title:
-                            offers.append({"title": title, "company": company,
-                                           "source": "WTTJ", "url": url,
-                                           "description": f"{title} chez {company}. {desc[:600]}"})
-            except Exception as e:
-                logger.debug(f"WTTJ scrape error: {e}")
+                        t = job.get("name",""); co = job.get("company",{}).get("name","")
+                        slug_co = job.get("company",{}).get("slug","")
+                        slug_j  = job.get("slug","")
+                        url = f"https://www.welcometothejungle.com/fr/companies/{slug_co}/jobs/{slug_j}"
+                        desc = (job.get("description","") or "")[:500]
+                        if t: offers.append({"title":t,"company":co,"source":"WTTJ","url":url,
+                            "description":f"{t} chez {co}. {desc}"})
+            except Exception: pass
     return offers
 
-async def scrape_indeed_rss(queries: list[str], location: str = "France") -> list:
-    """Indeed — via le flux RSS public (pas de clé requise)."""
+# 2 — Indeed RSS ──────────────────────────────────────
+async def _indeed(queries: list, location: str) -> list:
     offers = []
-    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
-        for q in queries[:2]:
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR) as cl:
+        for q in queries[:3]:
             try:
-                params = {"q": q, "l": location, "sort": "date", "limit": 10}
-                r = await cl.get("https://fr.indeed.com/rss", params=params)
+                r = await cl.get("https://fr.indeed.com/rss",
+                    params={"q": q, "l": location, "sort": "date", "limit": 10})
                 if r.status_code == 200:
-                    # Parse RSS xml basique
-                    items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
-                    for item in items[:5]:
-                        title_m   = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)
-                        link_m    = re.search(r"<link>(.*?)</link>", item)
-                        desc_m    = re.search(r"<description><!\[CDATA\[(.*?)\]\]></description>", item)
-                        title     = title_m.group(1).strip() if title_m else ""
-                        url       = link_m.group(1).strip()  if link_m  else ""
-                        desc_raw  = desc_m.group(1).strip()  if desc_m  else ""
-                        desc_clean = re.sub(r"<[^>]+>", " ", desc_raw).strip()[:600]
-                        company_m = re.search(r"<source.*?>(.*?)</source>", item)
-                        company   = company_m.group(1) if company_m else ""
-                        if title:
-                            offers.append({"title": title, "company": company,
-                                           "source": "Indeed", "url": url,
-                                           "description": f"{title}. {desc_clean}"})
-            except Exception as e:
-                logger.debug(f"Indeed RSS error: {e}")
+                    offers.extend(_rss_parse(r.text, "Indeed"))
+            except Exception: pass
     return offers
 
-async def scrape_remotive(queries: list[str]) -> list:
-    """Remotive.com — API JSON publique sans clé pour offres remote."""
+# 3 — Remotive JSON ───────────────────────────────────
+async def _remotive(queries: list) -> list:
     offers = []
     async with httpx.AsyncClient(timeout=15.0) as cl:
         for q in queries[:2]:
             try:
-                r = await cl.get("https://remotive.com/api/remote-jobs",
-                                 params={"search": q, "limit": 5})
+                r = await cl.get("https://remotive.com/api/remote-jobs", params={"search": q, "limit": 5})
                 if r.status_code == 200:
                     for job in r.json().get("jobs", [])[:5]:
-                        title   = job.get("title", "")
-                        company = job.get("company_name", "")
-                        url     = job.get("url", "")
-                        desc    = re.sub(r"<[^>]+>", " ", job.get("description", "")).strip()[:600]
-                        if title:
-                            offers.append({"title": title, "company": company,
-                                           "source": "Remotive", "url": url,
-                                           "description": f"{title} chez {company}. {desc}"})
-            except Exception as e:
-                logger.debug(f"Remotive error: {e}")
+                        t = job.get("title",""); co = job.get("company_name","")
+                        desc = re.sub(r"<[^>]+>"," ", job.get("description","")).strip()[:500]
+                        if t: offers.append({"title":t,"company":co,"source":"Remotive",
+                            "url":job.get("url",""),"description":f"{t} chez {co}. {desc}"})
+            except Exception: pass
     return offers
 
-async def scrape_freelance_com(queries: list[str]) -> list:
-    """Freelance.com — flux RSS public des missions."""
+# 4 — Freelance.com RSS ───────────────────────────────
+async def _freelance_com(queries: list) -> list:
     offers = []
-    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as cl:
-        for q in queries[:1]:
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR) as cl:
+        for q in queries[:2]:
             try:
                 r = await cl.get(f"https://www.freelance.com/rss.php?mot={q.replace(' ','+')}")
                 if r.status_code == 200:
-                    items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
-                    for item in items[:4]:
-                        title_m = re.search(r"<title>(.*?)</title>", item)
-                        link_m  = re.search(r"<link>(.*?)</link>", item)
-                        desc_m  = re.search(r"<description>(.*?)</description>", item, re.DOTALL)
-                        title   = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else ""
-                        url     = link_m.group(1).strip() if link_m else ""
-                        desc    = re.sub(r"<[^>]+>", " ", desc_m.group(1)).strip()[:500] if desc_m else ""
-                        if title:
-                            offers.append({"title": title, "company": "", "source": "Freelance.com",
-                                           "url": url, "description": f"{title}. {desc}"})
-            except Exception as e:
-                logger.debug(f"Freelance.com RSS error: {e}")
+                    offers.extend(_rss_parse(r.text, "Freelance.com"))
+            except Exception: pass
     return offers
 
+# 5 — Adzuna API (gratuit avec clé) ──────────────────
+async def _adzuna(queries: list) -> list:
+    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
+        return []
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0) as cl:
+        for q in queries[:2]:
+            try:
+                r = await cl.get("https://api.adzuna.com/v1/api/jobs/fr/search/1",
+                    params={"app_id":ADZUNA_APP_ID,"app_key":ADZUNA_APP_KEY,
+                            "what":q,"results_per_page":5,"sort_by":"date","contract_type":"contract"})
+                if r.status_code == 200:
+                    for job in r.json().get("results",[])[:5]:
+                        t = job.get("title",""); co = job.get("company",{}).get("display_name","")
+                        desc = re.sub(r"<[^>]+>"," ", job.get("description","")).strip()[:500]
+                        if t: offers.append({"title":t,"company":co,"source":"Adzuna",
+                            "url":job.get("redirect_url",""),"description":f"{t} chez {co}. {desc}"})
+            except Exception: pass
+    return offers
+
+# 6 — Jobijoba RSS ────────────────────────────────────
+async def _jobijoba(queries: list) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR) as cl:
+        for q in queries[:2]:
+            try:
+                r = await cl.get(f"https://www.jobijoba.com/fr/rss/?what={q.replace(' ','+')}")
+                if r.status_code == 200:
+                    offers.extend(_rss_parse(r.text, "Jobijoba"))
+            except Exception: pass
+    return offers
+
+# 7 — France Travail RSS ──────────────────────────────
+async def _france_travail(queries: list) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR, follow_redirects=True) as cl:
+        for q in queries[:2]:
+            try:
+                r = await cl.get(
+                    f"https://candidat.francetravail.fr/offres/recherche/rss?motsCles={q.replace(' ','+')}",
+                    headers=_HDR)
+                if r.status_code == 200:
+                    offers.extend(_rss_parse(r.text, "France Travail"))
+            except Exception: pass
+    return offers
+
+# 8 — HelloWork ───────────────────────────────────────
+async def _hellowork(queries: list) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR, follow_redirects=True) as cl:
+        for q in queries[:2]:
+            try:
+                r = await cl.get("https://www.hellowork.com/fr-fr/emploi/recherche.html",
+                    params={"k":q,"c":"Freelance,Mission","s":"date"})
+                if r.status_code == 200:
+                    titles   = re.findall(r'<h2[^>]*class="[^"]*job-title[^"]*"[^>]*>(.*?)</h2>', r.text, re.DOTALL)
+                    companies= re.findall(r'<span[^>]*class="[^"]*company[^"]*"[^>]*>(.*?)</span>', r.text, re.DOTALL)
+                    links    = re.findall(r'href="(/fr-fr/emploi/[^"?]+)"', r.text)
+                    for i, raw_t in enumerate(titles[:5]):
+                        t  = re.sub(r"<[^>]+>","",raw_t).strip()
+                        co = re.sub(r"<[^>]+>","",companies[i]).strip() if i < len(companies) else ""
+                        url= f"https://www.hellowork.com{links[i]}" if i < len(links) else ""
+                        if t: offers.append({"title":t,"company":co,"source":"HelloWork","url":url,
+                            "description":f"{t} chez {co}."})
+            except Exception: pass
+    return offers
+
+# 9 — LinkedIn Jobs RSS (sans auth) ───────────────────
+async def _linkedin_rss(queries: list, location: str) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers=_HDR, follow_redirects=True) as cl:
+        for q in queries[:2]:
+            try:
+                url = f"https://www.linkedin.com/jobs/search?keywords={q.replace(' ','%20')}&location={location}&f_JT=C&format=rss"
+                r = await cl.get(url)
+                if r.status_code == 200:
+                    offers.extend(_rss_parse(r.text, "LinkedIn"))
+                else:
+                    # Fallback: scrape page HTML
+                    r2 = await cl.get("https://www.linkedin.com/jobs/search/",
+                        params={"keywords":q,"location":location,"f_JT":"C","sortBy":"DD"})
+                    items = re.findall(r'<li[^>]*class="[^"]*result-card[^"]*"[^>]*>(.*?)</li>', r2.text, re.DOTALL)
+                    for item in items[:5]:
+                        t_m  = re.search(r'<h3[^>]*>(.*?)</h3>', item, re.DOTALL)
+                        co_m = re.search(r'<h4[^>]*>(.*?)</h4>', item, re.DOTALL)
+                        l_m  = re.search(r'href="([^"]+/jobs/view/[^"]+)"', item)
+                        t    = re.sub(r"<[^>]+>","",t_m.group(1)).strip()  if t_m  else ""
+                        co   = re.sub(r"<[^>]+>","",co_m.group(1)).strip() if co_m else ""
+                        link = l_m.group(1).split("?")[0]                  if l_m  else ""
+                        if t: offers.append({"title":t,"company":co,"source":"LinkedIn",
+                            "url":link,"description":f"{t} chez {co}."})
+            except Exception: pass
+    return offers
+
+# 10 — RemoteOK JSON ──────────────────────────────────
+async def _remoteok(queries: list) -> list:
+    offers = []
+    async with httpx.AsyncClient(timeout=15.0, headers={**_HDR,"Accept":"application/json"}) as cl:
+        try:
+            r = await cl.get("https://remoteok.com/api")
+            if r.status_code == 200:
+                jobs = [j for j in r.json() if isinstance(j, dict) and j.get("position")]
+                kws  = [s.lower() for s in PROFILE.get("skills",[])[:5]]
+                kws += [q.split()[0].lower() for q in queries[:3]]
+                for job in jobs[:60]:
+                    text = f"{job.get('position','').lower()} {' '.join(job.get('tags',[])).lower()}"
+                    if any(k in text for k in kws):
+                        t   = job.get("position",""); co = job.get("company","")
+                        url = job.get("url","") or f"https://remoteok.com/l/{job.get('id','')}"
+                        desc= re.sub(r"<[^>]+>"," ", job.get("description","")).strip()[:400]
+                        offers.append({"title":t,"company":co,"source":"RemoteOK","url":url,
+                            "description":f"{t} chez {co}. {desc}"})
+                    if len(offers) >= 5: break
+        except Exception: pass
+    return offers
+
+# ── Orchestrateur ─────────────────────────────────────
 async def scrape_offers_free() -> list:
-    """Orchestrateur — scrapers gratuits en parallèle, dédoublonnage, fallback mock."""
-    sector  = PROFILE.get("sector", "Data & Tech")
-    preset  = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
-    queries = preset["search_queries"] or [PROFILE.get("title", "Consultant freelance")]
-    location = PROFILE.get("location", "France").split(",")[0].strip() or "France"
+    """10 scrapers en parallèle → dédoublonnage → tri."""
+    sector   = PROFILE.get("sector","Data & Tech")
+    preset   = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
+    queries  = list(preset["search_queries"]) or [PROFILE.get("title","Consultant freelance")]
+    extra    = PROFILE.get("keywords",[])
+    if extra: queries += [f"{queries[0]} {k}" for k in extra[:2]]
+    location = (PROFILE.get("location","France").split(",")[0].strip()) or "France"
+    enabled  = set(SCRAPERS_ENABLED)
 
-    logger.info(f"Scraping gratuit — secteur: {sector}, {len(queries)} requêtes")
-    results = await asyncio.gather(
-        scrape_wttj(queries),
-        scrape_indeed_rss(queries, location),
-        scrape_remotive(queries),
-        scrape_freelance_com(queries),
-        return_exceptions=True,
-    )
+    logger.info(f"Scraping ×10 — secteur={sector} | {len(queries)} requêtes | location={location}")
 
-    all_offers = []
+    coros = []
+    names = []
+    pairs = [
+        ("wttj",          _wttj(queries)),
+        ("indeed",        _indeed(queries, location)),
+        ("remotive",      _remotive(queries)),
+        ("freelance_com", _freelance_com(queries)),
+        ("adzuna",        _adzuna(queries)),
+        ("jobijoba",      _jobijoba(queries)),
+        ("france_travail",_france_travail(queries)),
+        ("hellowork",     _hellowork(queries)),
+        ("linkedin",      _linkedin_rss(queries, location)),
+        ("remoteok",      _remoteok(queries)),
+    ]
+    for name, coro in pairs:
+        if name in enabled:
+            coros.append(_timed(coro, name))
+            names.append(name)
+
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    all_offers: list = []
     for r in results:
-        if isinstance(r, list):
-            all_offers.extend(r)
-        else:
-            logger.debug(f"Scraper exception: {r}")
+        if isinstance(r, list): all_offers.extend(r)
 
     if all_offers:
         seen, deduped = set(), []
         for o in all_offers:
-            key = o["title"].lower()[:40]
+            key = o["title"].lower()[:45]
             if key not in seen:
                 seen.add(key); deduped.append(o)
-        logger.info(f"Scraping gratuit: {len(deduped)} offres uniques")
-        return deduped[:10]
+        logger.info(f"Scraping terminé: {len(deduped)} offres uniques depuis {len(names)} sources actives")
+        return deduped[:20]
 
-    logger.warning("Scraping gratuit: aucun résultat — fallback mock")
+    logger.warning("Tous scrapers vides — fallback mock")
     return _build_mock_offers()
 
-MOCK_OFFERS: list = []   # rempli dynamiquement
+async def get_offers_today() -> list:
+    """Apify (si clé) → 10 scrapers gratuits → mock."""
+    if APIFY_TOKEN:
+        return await scrape_offers_apify()
+    return await scrape_offers_free()
+
+
 
 async def scrape_offers_apify() -> list:
-    """Scraping via Apify avec fallback mock automatique."""
+    """Scraping via Apify — requêtes construites depuis le profil utilisateur."""
     logger.info("Scraping via Apify...")
+    sector  = PROFILE.get("sector","Data & Tech")
+    preset  = SECTOR_PRESETS.get(sector, SECTOR_PRESETS["Data & Tech"])
+    queries = list(preset["search_queries"])[:3] or [PROFILE.get("title","Consultant freelance")]
+    location = (PROFILE.get("location","France").split(",")[0].strip()) or "France"
     all_offers = []
-    queries = [
-        "Data Architect freelance France remote",
-        "Data Engineer Senior freelance remote France",
-        "Lead Data Engineer Snowflake DBT freelance",
-    ]
     async with httpx.AsyncClient(timeout=120.0) as cl:
         for q in queries:
             try:
@@ -1063,7 +1316,7 @@ async def scrape_offers_apify() -> list:
                     "https://api.apify.com/v2/acts/hMvNSpz3JnHgl5jkh/runs",
                     headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
                     params={"token": APIFY_TOKEN},
-                    json={"queries": q, "location": "France", "maxResults": 5,
+                    json={"queries": q, "location": location, "maxResults": 5,
                           "contractType": "CONTRACT", "datePosted": "past-week"},
                 )
                 if run_r.status_code not in (200, 201):
@@ -1210,6 +1463,10 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
             db_exec(conn,
                 "INSERT INTO linkedin_posts(topic,format,tone,content,status) VALUES(?,?,?,?,?)",
                 (topic, fmt, "viral", post.strip(), "ready"))
+        # ── Planifier la publication automatique ─────────────────────────────
+        # Délai : publié demain matin à LINKEDIN_POST_HOUR si AUTO, sinon créé comme "manual"
+        delay_h = max(0, LINKEDIN_POST_HOUR - datetime.now().hour + 24 if datetime.now().hour >= LINKEDIN_POST_HOUR else LINKEDIN_POST_HOUR - datetime.now().hour)
+        sched_id = _schedule_linkedin_post(post.strip(), topic, fmt, delay_hours=int(delay_h))
     except Exception as e:
         post = f"[Erreur post: {e}]"
 
@@ -1347,28 +1604,31 @@ async def run_auto_apply(offer_id, title, company, description, analysis, compan
         if company_email:
             log_act("🔍", f"Hunter.io: {company_email} trouvé pour {company}", "agent")
 
-    cv = await ask_json(f"""Tu es un expert RH spécialisé Data Engineering. Génère un CV JSON complet, moderne et percutant pour Sekouna KABA.
+    _name  = PROFILE.get("name", "Candidat")
+    _title = PROFILE.get("title", "Consultant Freelance")
+    _exps  = PROFILE.get("experiences", [])
+    _recent_co = ", ".join([e.get("company","") for e in _exps[:3]]) if _exps else "mes missions récentes"
+    _tjm   = f"{PROFILE.get('tjm_min',500)}-{PROFILE.get('tjm_max',900)}€"
+
+    cv = await ask_json(f"""Tu es un expert RH. Génère un CV JSON complet et percutant pour {_name}.
 
 PROFIL COMPLET:
 {json.dumps(PROFILE)}
 
 OFFRE CIBLÉE: {description[:1000]}
 
-INSTRUCTIONS IMPORTANTES:
-- title_adapted: titre exact qui CORRESPOND à l offre (ex: "Lead Data Architect Snowflake & dbt | Freelance")
-- accroche: 3-4 phrases IMPACTANTES à la 1ère personne. Commence par un chiffre ou un résultat concret. Mentionne les missions SACEM/Thales/Accor. Donne envie de lire la suite.
-- competences_core: 6-8 compétences PRINCIPALES directement liées à l offre (ex: "Snowflake SnowPro Certified", "dbt Core / dbt Cloud", "Apache Airflow")
-- competences_secondaires: 6-8 compétences complémentaires (Cloud, DevOps, BI...)
-- kpis: 3 chiffres clés percutants (ex: "50M+ événements/jour", "12 pipelines migrés", "3 clouds maîtrisés")
-- experiences: TOUTES les expériences avec 4-5 missions détaillées chacune, stack technique, résultats mesurables
-- formations: liste des diplômes et certifications
-- langues: langues avec niveau
-- tjm_suggest: TJM précis entre 500-900euro adapté à l offre
-- soft_skills: 4 soft skills pertinents pour ce poste
+INSTRUCTIONS:
+- title_adapted: titre qui correspond exactement à l'offre
+- accroche: 3-4 phrases impactantes à la 1ère personne avec chiffres et missions réelles ({_recent_co})
+- competences_core: 6-8 compétences principales liées à l'offre
+- competences_secondaires: 6-8 compétences complémentaires
+- kpis: 3 chiffres clés percutants tirés du profil
+- experiences: TOUTES les expériences avec missions détaillées, stack, résultats mesurables
+- tjm_suggest: TJM entre {_tjm} adapté à l'offre
 
 JSON EXACT:
-{{"title_adapted":"<titre adapté>","accroche":"<3-4 phrases percutantes>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":["<c1>","<c2>","<c3>","<c4>","<c5>","<c6>"],"competences_secondaires":["<c1>","<c2>","<c3>","<c4>","<c5>"],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre exact>","context":"<contexte mission en 1 phrase>","missions":["<mission détaillée avec impact>","<mission détaillée>","<mission détaillée>","<mission>"],"stack":"<tech1, tech2, tech3>"}}],"formations":[{{"diplome":"<titre>","ecole":"<école>","annee":"<année>"}}],"certifications":["<cert1>","<cert2>"],"langues":[{{"langue":"<langue>","niveau":"<niveau>"}}],"soft_skills":["<skill1>","<skill2>","<skill3>","<skill4>"],"tjm_suggest":"<TJM>€/j"}}
-JSON seul, aucun texte autour.""", 1800)
+{{"title_adapted":"<titre>","accroche":"<3-4 phrases>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":["<c1>","<c2>","<c3>","<c4>","<c5>","<c6>"],"competences_secondaires":["<c1>","<c2>","<c3>","<c4>","<c5>"],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre>","context":"<contexte>","missions":["<mission>","<mission>","<mission>","<mission>"],"stack":"<tech1, tech2>"}}],"formations":[{{"diplome":"<titre>","ecole":"<école>","annee":"<année>"}}],"certifications":["<cert1>","<cert2>"],"langues":[{{"langue":"<langue>","niveau":"<niveau>"}}],"soft_skills":["<skill1>","<skill2>","<skill3>","<skill4>"],"tjm_suggest":"<TJM>€/j"}}
+JSON seul.""", 1800)
 
     # FIX-C : génération PDF async — différée si mode copilot (évite timeout Render 30s)
     if defer_pdf:
@@ -1378,11 +1638,12 @@ JSON seul, aucun texte autour.""", 1800)
         pdf_bytes = await generate_cv_pdf(cv, title)
         pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
 
-    email_body = await ask(f"""Tu es Sekouna KABA, Data Engineer Senior freelance.
-Email candidature pour: {title} chez {company or "l entreprise"}.
-TJM: {analysis.get('tjm_negotiate','760euro/j')}
-100-130 mots, direct, 1ere personne, mentionne SACEM ou Thales, mentionne CV en PJ.
-UNIQUEMENT le texte.""", 500)
+    email_body = await ask(f"""Tu es {_name}, {_title} freelance.
+Email candidature pour: {title} chez {company or "l'entreprise"}.
+TJM: {analysis.get('tjm_negotiate', _tjm)}
+Missions récentes: {_recent_co}
+100-130 mots, direct, 1ere personne, mentionne une ou deux missions récentes, mentionne CV en PJ.
+UNIQUEMENT le texte de l'email.""", 500)
 
     subject      = f"Candidature freelance — {cv.get('title_adapted', title)}"
     followup_at  = (datetime.now() + timedelta(days=FOLLOWUP_DAYS)).isoformat()
@@ -1587,9 +1848,9 @@ async def run_followups():
         try:
             # Générer le texte de relance via IA
             followup_text = await ask(
-                f"Tu es Sekouna KABA, Data Architect freelance. "
+                f"Tu es {PROFILE.get('name','Candidat')}, {PROFILE.get('title','Consultant freelance')} freelance. "
                 f"Écris un email de relance court (50-70 mots) pour la candidature: {title}. "
-                f"TJM proposé: {tjm or '760€/j'}. "
+                f"TJM proposé: {tjm or str(PROFILE.get('tjm_max',800))+'€/j'}. "
                 f"Ton naturel, direct, rappelle la candidature initiale, propose un échange rapide. "
                 f"UNIQUEMENT le texte de l'email.", 400)
 
@@ -1626,7 +1887,7 @@ async def run_followups():
 # ══════════════════════════════════════════════════════
 
 async def run_negotiation(context, current_offer, target):
-    return await ask_json(f"""Sekouna KABA, Data Architect/Engineer Senior freelance. TJM 500-900euro.
+    return await ask_json(f"""{PROFILE.get("name","Candidat")}, {PROFILE.get("title","Consultant freelance")}. TJM {PROFILE.get("tjm_min",500)}-{PROFILE.get("tjm_max",900)}€.
 {json.dumps(PROFILE)}
 Negociation — Offre: {current_offer} | Cible: {target} | Contexte: {context}
 JSON:{{"counter_offer":"<TJM exact 500-900euro>","opening_line":"<1ere phrase exacte>",
@@ -1644,18 +1905,20 @@ JSON seul.""", 1200)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("=" * 60)
-    logger.info("DataLinkedAI v8.0 — Démarrage")
-    logger.info(f"  IA        : {AI_PROVIDER} / {AI_MODEL or 'non configuré'}")
-    logger.info(f"  DB        : {'PostgreSQL Supabase' if USE_POSTGRES else 'SQLite /tmp (non persistant)'}")
-    logger.info(f"  Email     : {EMAIL_PROVIDER}")
-    logger.info(f"  Scraping  : {'Apify (réel)' if APIFY_TOKEN else 'Mock'}")
-    logger.info(f"  Sécurité  : {'API Key ON' if API_KEY else '⚠️  DESACTIVEE — configure API_KEY'}")
-    logger.info(f"  Auto-apply: {'ACTIF (>=' + str(AUTO_APPLY_MIN_SCORE) + '%)' if AUTO_APPLY_ENABLED else 'Manuel'}")
+    logger.info("DataLinkedAI v11.0 — Démarrage")
+    logger.info(f"  IA           : {AI_PROVIDER} / {AI_MODEL or 'non configuré'}")
+    logger.info(f"  DB           : {'PostgreSQL Supabase' if USE_POSTGRES else 'SQLite /tmp (non persistant)'}")
+    logger.info(f"  Email        : {EMAIL_PROVIDER}")
+    logger.info(f"  Scraping     : {'Apify (réel)' if APIFY_TOKEN else f'×10 gratuits ({len(SCRAPERS_ENABLED)} actifs)'}")
+    logger.info(f"  LinkedIn auto: {'ACTIF (' + LINKEDIN_POST_DAYS + ' à ' + str(LINKEDIN_POST_HOUR) + 'h)' if LINKEDIN_AUTO_POST else 'Manuel (validation requise)'}")
+    logger.info(f"  Sécurité     : {'API Key ON' if API_KEY else '⚠️  DESACTIVEE — configure API_KEY'}")
+    logger.info(f"  Auto-apply   : {'ACTIF (>=' + str(AUTO_APPLY_MIN_SCORE) + '%)' if AUTO_APPLY_ENABLED else 'Manuel'}")
     if AI_PROVIDER == "none":
         logger.warning("⚠️  Aucune clé IA — les endpoints IA renverront une erreur 500")
     logger.info("=" * 60)
     init_db()
-    load_profile()   # charge le profil depuis la DB (ou DEFAULT_PROFILE si première fois)
+    load_profile()
+    # Jobs planifiés
     scheduler.add_job(run_copilot,   CronTrigger(day_of_week="mon-fri", hour=COPILOT_HOUR, minute=0),
                       id="copilot",  replace_existing=True)
     scheduler.add_job(backup_database, CronTrigger(hour=2, minute=0),
@@ -1664,6 +1927,9 @@ async def lifespan(app: FastAPI):
                       misfire_grace_time=300)
     scheduler.add_job(run_followups, CronTrigger(hour=10, minute=0),
                       id="followups", replace_existing=True)
+    # LinkedIn auto-post : toutes les 15 min vérifier les posts planifiés
+    scheduler.add_job(run_linkedin_scheduler, "interval", minutes=15,
+                      id="linkedin_scheduler", misfire_grace_time=300)
     scheduler.start()
     yield
     # Shutdown
@@ -1693,14 +1959,17 @@ async def dashboard_ui():
 # ── Health ───────────────────────────────────────────
 @app.get("/health", tags=["Système"])
 async def health():
+    token, pid = _get_linkedin_token()
     return {
-        "status": "ok", "version": "8.0.0",
+        "status": "ok", "version": "11.0.0",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
-        "scraping": "apify" if APIFY_TOKEN else "mock",
+        "scraping": "apify" if APIFY_TOKEN else f"free_x10 ({len(SCRAPERS_ENABLED)} sources)",
         "security": "api_key" if API_KEY else "none",
         "auto_apply": AUTO_APPLY_ENABLED,
+        "linkedin_auto": LINKEDIN_AUTO_POST,
+        "linkedin_token": bool(token),
         "jobs": [{"id": j.id, "next": str(j.next_run_time)} for j in scheduler.get_jobs()],
     }
 
@@ -2028,6 +2297,128 @@ async def list_posts(_=Depends(verify_api_key)):
     return [{"id": r[0], "topic": r[1], "format": r[2], "tone": r[3],
              "content": r[4], "status": r[5], "created_at": str(r[6])} for r in rows]
 
+@app.get("/api/linkedin/schedule", tags=["LinkedIn Studio"])
+async def list_linkedin_schedule(_=Depends(verify_api_key)):
+    """Calendrier éditorial — posts planifiés / publiés / en erreur."""
+    with db_conn() as conn:
+        rows = db_exec(conn,
+            "SELECT id,topic,format,content,scheduled_at,published_at,status,linkedin_post_id,error,created_at FROM linkedin_schedule ORDER BY scheduled_at DESC LIMIT 30"
+        ).fetchall()
+    return [{"id":r[0],"topic":r[1],"format":r[2],"content":r[3],"scheduled_at":str(r[4]),
+             "published_at":str(r[5]),"status":r[6],"linkedin_post_id":r[7],
+             "error":r[8],"created_at":str(r[9])} for r in rows]
+
+class LinkedInPostNowReq(BaseModel):
+    content: str
+    topic: str = ""
+
+@app.post("/api/linkedin/publish", tags=["LinkedIn Studio"])
+async def publish_linkedin_now(req: LinkedInPostNowReq, request: Request, _=Depends(verify_api_key)):
+    """Publie immédiatement un post sur LinkedIn via l'API."""
+    _check_rate(request, "linkedin_publish", 5, 3600)
+    result = await linkedin_publish(req.content)
+    if result["success"]:
+        with db_conn() as conn:
+            db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (req.content,))
+            try:
+                db_exec(conn,
+                    "UPDATE linkedin_schedule SET status='published', published_at=?, linkedin_post_id=? WHERE content=?",
+                    (datetime.now().isoformat(), result.get("post_id",""), req.content))
+            except Exception: pass
+        log_act("💼", f"Post LinkedIn publié manuellement: {req.topic}", "linkedin")
+    return {**result, "topic": req.topic}
+
+class LinkedInScheduleReq(BaseModel):
+    content: str
+    topic: str = ""
+    format: str = ""
+    scheduled_at: str   # ISO8601 ex: "2025-06-16T09:00:00"
+
+@app.post("/api/linkedin/schedule", tags=["LinkedIn Studio"])
+async def schedule_linkedin_post(req: LinkedInScheduleReq, _=Depends(verify_api_key)):
+    """Planifie un post pour publication automatique à une date/heure précise."""
+    try:
+        with db_conn() as conn:
+            cur = db_insert(conn,
+                "INSERT INTO linkedin_schedule(content,topic,format,scheduled_at,status) VALUES(?,?,?,?,?)",
+                (req.content, req.topic, req.format, req.scheduled_at,
+                 "scheduled" if LINKEDIN_AUTO_POST else "manual"))
+            sched_id = cur.lastrowid
+        log_act("💼", f"Post planifié: {req.topic} → {req.scheduled_at}", "linkedin")
+        return {"status": "scheduled", "id": sched_id, "scheduled_at": req.scheduled_at,
+                "will_auto_publish": LINKEDIN_AUTO_POST}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+class LinkedInTokenReq(BaseModel):
+    access_token: str
+    person_id: str
+
+@app.post("/api/linkedin/token", tags=["LinkedIn Studio"])
+async def set_linkedin_token(req: LinkedInTokenReq, _=Depends(verify_api_key)):
+    """Persiste le token LinkedIn OAuth en DB (survit aux redémarrages)."""
+    with db_conn() as conn:
+        existing = db_exec(conn, "SELECT id FROM linkedin_tokens WHERE id=1").fetchone()
+        if existing:
+            db_exec(conn, "UPDATE linkedin_tokens SET access_token=?, person_id=?, updated_at=? WHERE id=1",
+                    (req.access_token, req.person_id, datetime.now().isoformat()))
+        else:
+            db_exec(conn, "INSERT INTO linkedin_tokens(id,access_token,person_id,updated_at) VALUES(1,?,?,?)",
+                    (req.access_token, req.person_id, datetime.now().isoformat()))
+    log_act("🔑", "Token LinkedIn mis à jour", "linkedin")
+    return {"status": "saved", "person_id": req.person_id}
+
+@app.get("/api/linkedin/status", tags=["LinkedIn Studio"])
+async def linkedin_status(_=Depends(verify_api_key)):
+    """Statut de la connexion LinkedIn (token présent, dernière publication, etc.)."""
+    token, pid = _get_linkedin_token()
+    with db_conn() as conn:
+        last_pub = db_exec(conn,
+            "SELECT topic, published_at FROM linkedin_schedule WHERE status='published' ORDER BY published_at DESC LIMIT 1"
+        ).fetchone()
+        scheduled = db_exec(conn,
+            "SELECT COUNT(*) FROM linkedin_schedule WHERE status='scheduled'"
+        ).fetchone()[0]
+    return {
+        "token_configured": bool(token),
+        "person_id_configured": bool(pid),
+        "auto_post_enabled": LINKEDIN_AUTO_POST,
+        "post_days": LINKEDIN_POST_DAYS,
+        "post_hour": LINKEDIN_POST_HOUR,
+        "pending_scheduled": scheduled,
+        "last_published": {"topic": last_pub[0], "at": str(last_pub[1])} if last_pub else None,
+    }
+
+@app.get("/api/scrapers/stats", tags=["Scraping"])
+async def scraper_stats(_=Depends(verify_api_key)):
+    """Statistiques de performance par source de scraping."""
+    with db_conn() as conn:
+        rows = db_exec(conn, """
+            SELECT source,
+                   COUNT(*) as runs,
+                   SUM(offers_found) as total_offers,
+                   AVG(latency_ms) as avg_ms,
+                   SUM(success) as successes,
+                   MAX(run_at) as last_run
+            FROM scraper_stats
+            GROUP BY source
+            ORDER BY total_offers DESC
+        """).fetchall()
+    return {
+        "sources": [{"source":r[0],"runs":r[1],"total_offers":r[2],
+                     "avg_latency_ms":round(r[3] or 0),"successes":r[4],
+                     "success_rate": round(100*r[4]/max(r[1],1)),
+                     "last_run":str(r[5])} for r in rows],
+        "enabled": SCRAPERS_ENABLED,
+        "apify_active": bool(APIFY_TOKEN),
+    }
+
+@app.get("/api/scrapers/run", tags=["Scraping"])
+async def trigger_scraping(_=Depends(verify_api_key)):
+    """Lance un scraping immédiat (toutes sources actives) et retourne les offres brutes."""
+    offers = await scrape_offers_free()
+    return {"count": len(offers), "offers": offers}
+
 # ── Prospection ──────────────────────────────────────
 class ProspectReq(BaseModel):
     target_context: str
@@ -2035,7 +2426,7 @@ class ProspectReq(BaseModel):
 @app.post("/api/prospecting/generate", tags=["Prospection"])
 async def gen_prospect(request: Request, req: ProspectReq, _=Depends(verify_api_key)):
     _check_rate(request, "gen_prospect", 15, 3600)
-    r = await ask_json(f"""Sekouna KABA Data Engineer Senior/Architect freelance.{json.dumps(PROFILE)}
+    r = await ask_json(f"""{PROFILE.get("name","Candidat")} {PROFILE.get("title","Consultant freelance")}.{json.dumps(PROFILE)}
 Contexte:{req.target_context}
 JSON:{{"targets":[{{"role":"<role>","why":"<raison>","msg":"<message connexion 280 chars>"}}],
 "connection_msg":"<message LinkedIn 300 chars>","inmail_subject":"<objet>",
@@ -2073,7 +2464,7 @@ class ProposalReq(BaseModel):
 async def gen_proposal(req: ProposalReq, request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "gen_proposal", 15, 3600)
     _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 fois/heure
-    r = await ask_json(f"""Sekouna KABA Data Architect/Engineer freelance. TJM 500-900euro.{json.dumps(PROFILE)}
+    r = await ask_json(f"""{PROFILE.get("name","Candidat")} {PROFILE.get("title","Consultant freelance")}. TJM {PROFILE.get("tjm_min",500)}-{PROFILE.get("tjm_max",900)}€.{json.dumps(PROFILE)}
 Brief:{req.brief}
 JSON:{{"title":"<titre>","exec_summary":"<3 phrases>","problem":"<2 phrases>","solution":"<3 para>",
 "deliverables":["<l1>","<l2>","<l3>","<l4>"],"methodology":["<e1>","<e2>","<e3>","<e4>"],
@@ -2086,7 +2477,7 @@ JSON seul.""", 1600)
 @app.post("/api/audit/profile", tags=["Audit Profil"])
 async def audit_profile(request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "audit_profile", 10, 3600)
-    r = await ask_json(f"""Audit profil LinkedIn Sekouna KABA freelance.{json.dumps(PROFILE)}
+    r = await ask_json(f"""Audit profil LinkedIn {PROFILE.get("name","Candidat")} freelance.{json.dumps(PROFILE)}
 JSON:{{"score":<0-100>,"seo":<0-100>,
 "sections":[{{"name":"<section>","score":<0-100>,"status":"<OK/A ameliorer/Critique>","advice":"<conseil>"}}],
 "headline":"<titre LinkedIn optimise>","about":"<A propos 200 mots SEO>",
@@ -2115,7 +2506,7 @@ class ContactReq(BaseModel):
 @app.post("/api/email/compose", tags=["Email Prospection"])
 async def compose_email(request: Request, req: EmailComposeReq, _=Depends(verify_api_key)):
     _check_rate(request, "compose_email", 30, 3600)
-    result = await ask_json(f"""Tu es Sekouna KABA, Data Engineer Senior/Architect freelance.{json.dumps(PROFILE)}
+    result = await ask_json(f"""Tu es {PROFILE.get("name","Candidat")}, {PROFILE.get("title","Consultant freelance")}.{json.dumps(PROFILE)}
 Email prospection B2B pour: {req.to_name}, {req.role} chez {req.company}.
 Contexte: {req.context or "entreprise tech/data"}. Ton: {req.tone}.
 120-160 mots MAX. Objet accrocheur. 1er para: observation specifique {req.company}.
@@ -2364,7 +2755,7 @@ class AutoApplyReq(BaseModel):
 async def agent_apply(req: AutoApplyReq, request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "agent_apply", 20, 3600)
     _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 candidatures/heure
-    analysis = await ask_json(f"""Sekouna KABA Data Architect/Engineer Senior. TJM 500-900euro.
+    analysis = await ask_json(f"""{PROFILE.get("name","Candidat")} {PROFILE.get("title","Consultant freelance")}. TJM {PROFILE.get("tjm_min",500)}-{PROFILE.get("tjm_max",900)}€.
 {json.dumps(PROFILE)}\nOffre: {req.description}
 JSON:{{"match_score":<0-100>,"tjm_negotiate":"<TJM 500-900euro>",
 "urgency":"<Postuler maintenant/Peut attendre>","match_reason":"<raison>"}}
@@ -2390,7 +2781,7 @@ JSON seul.""", 500)
             pass
         pdf_bytes = base64.b64decode(_pdf_b64) if _pdf_b64 else b""
         body_html = make_html_email(result.get("email_body", ""))
-        att_name  = f"CV_Sekouna_KABA_{req.offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+        att_name  = f"CV_{PROFILE.get('name','Candidat').replace(' ','_')}_{req.offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
         # ── Envoi isolé du update DB ──
         try:
             await send_email(req.company_email, req.company or "Recruteur",
@@ -2516,10 +2907,27 @@ async def approve_item(approval_id: int, _=Depends(verify_api_key)):
     result    = {}
     try:
         if item_type == "linkedin_post":
-            with db_conn() as conn:
-                db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (payload.get("content",""),))
-            log_act("checkmark", f"Post LinkedIn valide: {payload.get('topic','')}", "validation")
-            result = {"action": "post_published", "topic": payload.get("topic")}
+            content = payload.get("content","")
+            topic   = payload.get("topic","")
+            # Tenter la publication LinkedIn directe si token configuré
+            publish_result = {}
+            if content:
+                publish_result = await linkedin_publish(content)
+            if publish_result.get("success"):
+                with db_conn() as conn:
+                    db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (content,))
+                    db_exec(conn, "UPDATE linkedin_schedule SET status='published', published_at=?, linkedin_post_id=? WHERE content=?",
+                            (datetime.now().isoformat(), publish_result.get("post_id",""), content))
+                log_act("💼", f"Post LinkedIn publié: {topic}", "validation")
+                result = {"action": "post_published_linkedin", "topic": topic,
+                          "post_id": publish_result.get("post_id",""), "linkedin": True}
+            else:
+                # Pas de token ou erreur → marquer comme validé pour copier/coller manuel
+                with db_conn() as conn:
+                    db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (content,))
+                log_act("💼", f"Post LinkedIn validé (publication manuelle): {topic}", "validation")
+                result = {"action": "post_approved_manual", "topic": topic, "linkedin": False,
+                          "hint": publish_result.get("error","Configure LINKEDIN_ACCESS_TOKEN + LINKEDIN_PERSON_ID pour la publication auto.")}
         elif item_type == "candidature":
             app_id     = payload.get("app_id")
             company    = payload.get("company", "Recruteur")
@@ -2537,19 +2945,25 @@ async def approve_item(approval_id: int, _=Depends(verify_api_key)):
             if not pdf_b64_stored:
                 log_act("pdf", f"Génération PDF différée: {offer_title}", "validation")
                 try:
-                    # Régénérer le CV simplifié pour ce poste
+                    _p_name  = PROFILE.get("name","Candidat")
+                    _p_title = PROFILE.get("title","Consultant Freelance")
+                    _p_exps  = PROFILE.get("experiences", [])
+                    _p_certs = PROFILE.get("certifications", [])
+                    _p_langs = PROFILE.get("languages", [{"langue":"Français","niveau":"Natif"}])
+                    _p_skills = PROFILE.get("skills", [])
+                    _p_tjm   = f"{PROFILE.get('tjm_min',500)}-{PROFILE.get('tjm_max',900)}€/j"
                     cv_data = {
                         "title_adapted": offer_title,
-                        "accroche": f"Data Architect & Engineer Senior avec 8 ans d'expérience. Expert Snowflake, dbt, Airflow, PySpark. Missions SACEM, Thales, Accor.",
-                        "kpis": ["50M+ événements/jour", "12 pipelines migrés", "3 clouds maîtrisés"],
-                        "competences_core": ["Snowflake", "dbt Core", "Apache Airflow", "PySpark", "Python", "Kafka"],
-                        "competences_secondaires": ["AWS", "Azure", "GCP", "Terraform", "Docker", "GitLab CI/CD"],
-                        "experiences": PROFILE["experiences"],
-                        "formations": [{"diplome": "Master Informatique", "ecole": "Université", "annee": "2016"}],
-                        "certifications": ["AWS Certified", "GCP Professional Data Engineer", "Snowflake SnowPro"],
-                        "langues": [{"langue": "Français", "niveau": "Natif"}, {"langue": "Anglais", "niveau": "Courant"}],
-                        "soft_skills": ["Leadership technique", "Communication client", "Autonomie", "Esprit data-driven"],
-                        "tjm_suggest": "760€/j",
+                        "accroche": f"{_p_title} avec expérience confirmée. {PROFILE.get('bio','')}",
+                        "kpis": PROFILE.get("kpis", ["Expérience confirmée", "Missions grands comptes", "Disponible rapidement"]),
+                        "competences_core": _p_skills[:8] if _p_skills else ["Voir profil"],
+                        "competences_secondaires": _p_skills[8:16] if len(_p_skills)>8 else [],
+                        "experiences": _p_exps,
+                        "formations": PROFILE.get("formations", [{"diplome":"Formation","ecole":"","annee":""}]),
+                        "certifications": _p_certs,
+                        "langues": _p_langs if isinstance(_p_langs[0], dict) else [{"langue":l,"niveau":""} for l in _p_langs] if _p_langs else [{"langue":"Français","niveau":"Natif"}],
+                        "soft_skills": ["Autonomie", "Communication client", "Rigueur", "Adaptabilité"],
+                        "tjm_suggest": _p_tjm,
                     }
                     pdf_bytes_gen = await generate_cv_pdf(cv_data, offer_title)
                     pdf_b64_stored = base64.b64encode(pdf_bytes_gen).decode() if pdf_bytes_gen else ""
@@ -2561,7 +2975,8 @@ async def approve_item(approval_id: int, _=Depends(verify_api_key)):
 
             if to_email and EMAIL_PROVIDER != "none":
                 pdf_bytes = base64.b64decode(pdf_b64_stored) if pdf_b64_stored else b""
-                att_name  = f"CV_Sekouna_KABA_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+                _cand_name = PROFILE.get("name","Candidat").replace(" ","_")
+                att_name  = f"CV_{_cand_name}_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
                 try:
                     await send_email(to_email, company, subject, make_html_email(email_body), email_body,
                                      att_bytes=pdf_bytes or None, att_name=att_name)
@@ -2684,7 +3099,7 @@ async def analytics(_=Depends(verify_api_key)):
 
         # ── Emails ────────────────────────────────────────────────────
         emails_sent    = cnt("SELECT COUNT(*) FROM emails WHERE status='sent'")
-        emails_replied = cnt("SELECT COUNT(*) FROM emails WHERE replied=1")
+        emails_replied = cnt("SELECT COUNT(*) FROM emails WHERE replied_at IS NOT NULL")
         email_rate     = round(emails_replied/emails_sent*100,1) if emails_sent>0 else 0
 
         # ── Offres ────────────────────────────────────────────────────
@@ -2860,10 +3275,10 @@ async def public_profile():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta property="og:title" content="Sekouna KABA — Data Architect Freelance">
+<meta property="og:title" content="DataLinkedAI — Freelance Platform">
 <meta property="og:description" content="Data Architect / Engineer Senior • TJM 500-900€/j • Remote">
 <meta property="og:type" content="profile">
-<title>Sekouna KABA — Data Architect Freelance</title>
+<title>DataLinkedAI — Freelance Platform</title>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
@@ -2914,7 +3329,7 @@ async def public_profile():
 
 <div class="hero">
   <div class="avatar">SK</div>
-  <h1>Sekouna KABA</h1>
+  <h1 id="landing-name">DataLinkedAI</h1>
   <p class="subtitle">Data Architect &amp; Engineer Senior · Freelance</p>
   <div class="badges">
     <span class="badge gold">TJM 500–900€/j</span>
@@ -2986,7 +3401,7 @@ async def public_profile():
   </div>
 
 </div>
-<footer>Sekouna KABA · Data Architect & Engineer Senior Freelance · Powered by DataLinkedAI</footer>
+<footer>DataLinkedAI · Plateforme Freelance IA</footer>
 </body></html>"""
     return HTMLResponse(content=html)
 
