@@ -21,7 +21,7 @@ Variables RECOMMANDEES :
   COPILOT_EMAIL  (email reception digest matinal)
 """
 
-import os, json, sqlite3, httpx, logging, smtplib, ssl, asyncio, io, re, base64, random, pathlib
+import os, json, sqlite3, httpx, logging, smtplib, ssl, asyncio, io, re, base64, random, pathlib, hashlib, hmac, secrets
 from email.mime.text      import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base      import MIMEBase
@@ -114,6 +114,21 @@ PUSHOVER_TOKEN       = os.getenv("PUSHOVER_TOKEN", "")
 PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
 HUNTER_API_KEY       = os.getenv("HUNTER_API_KEY", "")
 DASHBOARD_URL        = os.getenv("DASHBOARD_URL", "https://datalinkedai.onrender.com/dashboard")
+
+# ── Notifications multi-canal ─────────────────────────────────────
+# Twilio — SMS & WhatsApp (gratuit avec sandbox WhatsApp)
+TWILIO_SID          = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_TOKEN        = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM_SMS     = os.getenv("TWILIO_FROM_SMS", "")        # ex: +15551234567
+TWILIO_FROM_WA      = os.getenv("TWILIO_FROM_WHATSAPP", "whatsapp:+14155238886")  # sandbox Twilio
+NOTIF_PHONE         = os.getenv("NOTIF_PHONE", "")            # ton numéro: +33612345678
+NOTIF_WHATSAPP      = os.getenv("NOTIF_WHATSAPP", "")         # ton numéro WA: +33612345678
+# Canaux activés (virgule-séparés): email,whatsapp,sms
+NOTIF_CHANNELS      = os.getenv("NOTIF_CHANNELS", "email").lower().split(",")
+# Secret pour les liens de validation en un clic (généré au démarrage si absent)
+# Stable fallback: derived from API_KEY so tokens survive restarts
+_approval_fallback = __import__("hashlib").sha256((os.getenv("API_KEY","datalinked") + "-approval").encode()).hexdigest()[:32]
+APPROVAL_SECRET     = os.getenv("APPROVAL_SECRET", _approval_fallback)
 
 # ── LinkedIn OAuth (publication automatique) ────────────────────────
 LINKEDIN_CLIENT_ID     = os.getenv("LINKEDIN_CLIENT_ID", "")
@@ -362,7 +377,7 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS copilot_runs(id SERIAL PRIMARY KEY,offers_found INTEGER DEFAULT 0,top_offer TEXT,top_score INTEGER,post_topic TEXT,digest_sent INTEGER DEFAULT 0,auto_applied INTEGER DEFAULT 0,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS negotiations(id SERIAL PRIMARY KEY,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',token TEXT,approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── NOUVELLES TABLES v10 ──────────────────────────────────────────────
         # Profil utilisateur configurable (1 seule ligne, id=1)
         "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
@@ -396,6 +411,16 @@ def init_db():
     except Exception as e:
         logger.error(f"init_db ERREUR: {e}")
         raise
+    # ── Migrations colonnes v12 (ALTER TABLE idempotent) ──────────────
+    _migrations = [
+        "ALTER TABLE pending_approvals ADD COLUMN token TEXT",
+        "ALTER TABLE pending_approvals ADD COLUMN notif_sent INTEGER DEFAULT 0",
+        "ALTER TABLE pending_approvals ADD COLUMN rejected_at TIMESTAMP",
+    ]
+    with db_conn() as conn:
+        for mig in _migrations:
+            try: db_exec(conn, mig)
+            except Exception: pass  # colonne existe déjà → OK
 
 def log_act(icon: str, text: str, mod: str):
     """Enregistre une activité (non-bloquant, erreurs ignorées)."""
@@ -576,22 +601,195 @@ async def enrich_company_email(company: str, domain: str = "") -> str:
     return ""
 
 
+def _make_approval_token(approval_id: int) -> str:
+    """Génère un token HMAC-SHA256 signé — unique par approbation."""
+    msg = f"{approval_id}:{APPROVAL_SECRET}".encode()
+    return hmac.new(APPROVAL_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+def _verify_approval_token(approval_id: int, token: str) -> bool:
+    expected = _make_approval_token(approval_id)
+    return hmac.compare_digest(expected, token)
+
+# ── Twilio SMS / WhatsApp ──────────────────────────────────────────
+async def send_sms(to: str, body: str) -> bool:
+    """Envoie un SMS via Twilio."""
+    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_SMS and to):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            r = await cl.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
+                auth=(TWILIO_SID, TWILIO_TOKEN),
+                data={"From": TWILIO_FROM_SMS, "To": to, "Body": body[:1600]},
+            )
+            ok = r.status_code in (200, 201)
+            if not ok: logger.warning(f"SMS Twilio error {r.status_code}: {r.text[:200]}")
+            return ok
+    except Exception as e:
+        logger.warning(f"send_sms error: {e}")
+        return False
+
+async def send_whatsapp(to: str, body: str) -> bool:
+    """Envoie un message WhatsApp via Twilio Sandbox."""
+    if not (TWILIO_SID and TWILIO_TOKEN and to):
+        return False
+    # Normalise le numéro au format whatsapp:+33...
+    wa_to = f"whatsapp:{to}" if not to.startswith("whatsapp:") else to
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            r = await cl.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
+                auth=(TWILIO_SID, TWILIO_TOKEN),
+                data={"From": TWILIO_FROM_WA, "To": wa_to, "Body": body[:1600]},
+            )
+            ok = r.status_code in (200, 201)
+            if not ok: logger.warning(f"WhatsApp Twilio error {r.status_code}: {r.text[:200]}")
+            return ok
+    except Exception as e:
+        logger.warning(f"send_whatsapp error: {e}")
+        return False
+
 async def notify(title: str, message: str, url: str = "", priority: int = 0) -> bool:
-    """Envoie une notification push via Pushover (gratuit, app mobile)."""
+    """Pushover legacy — remplacé par notify_all() mais conservé pour compatibilité."""
     if not PUSHOVER_TOKEN or not PUSHOVER_USER:
         return False
     try:
         async with httpx.AsyncClient(timeout=10.0) as cl:
             payload = {"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER,
                        "title": title[:100], "message": message[:512], "priority": priority}
-            if url:
-                payload["url"] = url
-                payload["url_title"] = "Ouvrir le Dashboard"
+            if url: payload["url"] = url; payload["url_title"] = "Ouvrir le Dashboard"
             r = await cl.post("https://api.pushover.net/1/messages.json", data=payload)
             return r.status_code == 200
     except Exception as e:
-        logger.warning(f"Pushover notification failed: {e}")
+        logger.warning(f"Pushover failed: {e}")
         return False
+
+def _approval_email_html(approvals: list, offers_html: str, post_preview: str, now_str: str, dashboard_url: str) -> str:
+    """Email de digest avec boutons ✅/❌ en un clic par item."""
+    items_html = ""
+    for a in approvals:
+        token   = a.get("token","")
+        aid     = a.get("id",0)
+        title   = a.get("title","")
+        preview = a.get("preview","")[:300]
+        atype   = a.get("type","")
+        icon    = "💼" if atype == "linkedin_post" else "📨"
+        score   = f'<span style="background:#00B96B;color:white;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700">{a.get("score","")}%</span>' if a.get("score") else ""
+        base    = DASHBOARD_URL.replace("/dashboard","")
+        approve_url = f"{base}/approve/{aid}/{token}"
+        reject_url  = f"{base}/reject/{aid}/{token}"
+        items_html += f"""
+<div style="background:#F8FAFF;border:1px solid #E0E7FF;border-radius:10px;padding:16px;margin-bottom:12px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <span style="font-size:1.2em">{icon}</span>
+    <strong style="font-size:14px;color:#1a1a2e">{title}</strong>
+    {score}
+  </div>
+  <div style="font-size:12px;color:#555;background:#fff;padding:10px;border-radius:6px;border-left:3px solid #1A56FF;white-space:pre-wrap;margin-bottom:12px;max-height:100px;overflow:hidden">{preview}</div>
+  <div style="display:flex;gap:8px">
+    <a href="{approve_url}" style="background:#00B96B;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;display:inline-block">✅ VALIDER ET ENVOYER</a>
+    <a href="{reject_url}" style="background:#F3F4F6;color:#555;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;display:inline-block;border:1px solid #ddd">❌ Rejeter</a>
+  </div>
+</div>"""
+
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;padding:20px;background:#f5f7fa;color:#1a1a2e">
+  <div style="background:linear-gradient(135deg,#1A56FF,#7C3AED);padding:24px;border-radius:14px;margin-bottom:20px;text-align:center">
+    <div style="font-size:28px;margin-bottom:6px">🤖</div>
+    <h1 style="color:white;margin:0;font-size:20px">DataLinkedAI — Validation requise</h1>
+    <p style="color:rgba(255,255,255,.85);margin:6px 0 0;font-size:13px">{len(approvals)} élément(s) en attente · {now_str}</p>
+  </div>
+
+  <div style="background:white;border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
+    <h2 style="font-size:15px;color:#1A56FF;margin:0 0 14px">👇 Valide ou rejette en un clic</h2>
+    {items_html}
+  </div>
+
+  {"<div style='background:white;border-radius:12px;padding:20px;margin-bottom:16px'><h3 style='font-size:14px;color:#1a1a2e;margin:0 0 10px'>📊 Top offres analysées</h3>" + offers_html + "</div>" if offers_html else ""}
+  {"<div style='background:white;border-radius:12px;padding:16px;margin-bottom:16px'><h3 style='font-size:14px;color:#1a1a2e;margin:0 0 8px'>💼 Post LinkedIn</h3><div style='font-size:12px;color:#555;white-space:pre-wrap;background:#F4F6FB;padding:12px;border-radius:6px'>" + post_preview[:400] + "...</div></div>" if post_preview else ""}
+
+  <div style="text-align:center;margin:20px 0">
+    <a href="{dashboard_url}" style="background:#1A56FF;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">📊 Ouvrir le Dashboard</a>
+  </div>
+  <p style="text-align:center;font-size:11px;color:#aaa">DataLinkedAI · Plateforme freelance automatisée</p>
+</body></html>"""
+
+async def notify_all(approvals: list, offers_html: str = "", post_preview: str = "", now_str: str = "") -> dict:
+    """Envoie les notifications de validation sur tous les canaux configurés.
+    Retourne un dict avec le statut de chaque canal."""
+    if not approvals:
+        return {}
+    results = {}
+    now_str = now_str or datetime.now().strftime("%A %d %B %Y")
+    n = len(approvals)
+    cands  = [a for a in approvals if a["type"] == "candidature"]
+    posts  = [a for a in approvals if a["type"] == "linkedin_post"]
+    dashboard_url = os.getenv("DASHBOARD_URL", DASHBOARD_URL)
+
+    # ── 1. EMAIL (toujours tenté si configuré) ──────────────────────────
+    if "email" in NOTIF_CHANNELS and COPILOT_EMAIL and EMAIL_PROVIDER != "none":
+        try:
+            html = _approval_email_html(approvals, offers_html, post_preview, now_str, dashboard_url)
+            txt  = f"[DataLinkedAI] {n} élément(s) à valider — {now_str}\n\n"
+            txt += "\n".join(f"- {a['title']}" for a in approvals)
+            txt += f"\n\nDashboard : {dashboard_url}"
+            await send_email(
+                COPILOT_EMAIL, PROFILE.get("name","Utilisateur"),
+                f"✅ [{n} validation(s)] DataLinkedAI — {now_str}",
+                html, txt,
+            )
+            results["email"] = "✅ envoyé"
+        except Exception as e:
+            results["email"] = f"❌ {e}"
+
+    # ── 2. WHATSAPP ───────────────────────────────────────────────────
+    if "whatsapp" in NOTIF_CHANNELS and NOTIF_WHATSAPP:
+        try:
+            base = DASHBOARD_URL.replace("/dashboard","")
+            wa_body = f"🤖 *DataLinkedAI* — {n} validation(s) en attente\n\n"
+            for a in approvals:
+                token = a.get("token","")
+                aid   = a.get("id",0)
+                icon  = "💼" if a["type"] == "linkedin_post" else "📨"
+                wa_body += f"{icon} {a['title']}\n"
+                if token:
+                    wa_body += f"✅ Valider : {base}/approve/{aid}/{token}\n"
+                    wa_body += f"❌ Rejeter : {base}/reject/{aid}/{token}\n"
+                wa_body += "\n"
+            wa_body += f"📊 Dashboard : {dashboard_url}"
+            ok = await send_whatsapp(NOTIF_WHATSAPP, wa_body)
+            results["whatsapp"] = "✅ envoyé" if ok else "❌ échec (vérifie TWILIO_ACCOUNT_SID)"
+        except Exception as e:
+            results["whatsapp"] = f"❌ {e}"
+
+    # ── 3. SMS ────────────────────────────────────────────────────────
+    if "sms" in NOTIF_CHANNELS and NOTIF_PHONE:
+        try:
+            base = DASHBOARD_URL.replace("/dashboard","")
+            sms_body = f"DataLinkedAI: {n} validation(s) en attente.\n"
+            for a in approvals[:2]:  # SMS limité en longueur
+                token = a.get("token","")
+                aid   = a.get("id",0)
+                sms_body += f"- {a['title'][:50]}\n"
+                if token:
+                    sms_body += f"OK: {base}/approve/{aid}/{token}\n"
+            sms_body += f"Dashboard: {dashboard_url}"
+            ok = await send_sms(NOTIF_PHONE, sms_body)
+            results["sms"] = "✅ envoyé" if ok else "❌ échec (vérifie TWILIO credentials)"
+        except Exception as e:
+            results["sms"] = f"❌ {e}"
+
+    # ── 4. Pushover (legacy) ──────────────────────────────────────────
+    if "pushover" in NOTIF_CHANNELS and PUSHOVER_TOKEN and PUSHOVER_USER:
+        ok = await notify(
+            f"DataLinkedAI — {n} élément(s) à valider",
+            f"{len(cands)} candidature(s) + {len(posts)} post(s) LinkedIn",
+            url=dashboard_url, priority=0,
+        )
+        results["pushover"] = "✅ envoyé" if ok else "❌ échec"
+
+    logger.info(f"notify_all: {results}")
+    return results
 
 def make_html_email(body_text: str) -> str:
     paras = "".join(
@@ -1293,14 +1491,6 @@ async def scrape_offers_free() -> list:
     logger.warning("Tous scrapers vides — fallback mock")
     return _build_mock_offers()
 
-async def get_offers_today() -> list:
-    """Apify (si clé) → 10 scrapers gratuits → mock."""
-    if APIFY_TOKEN:
-        return await scrape_offers_apify()
-    return await scrape_offers_free()
-
-
-
 async def scrape_offers_apify() -> list:
     """Scraping via Apify — requêtes construites depuis le profil utilisateur."""
     logger.info("Scraping via Apify...")
@@ -1470,20 +1660,23 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
     except Exception as e:
         post = f"[Erreur post: {e}]"
 
-    # ── Créer les approbations en attente ──────────────────────────────
+    # ── Créer les approbations avec tokens signés ──────────────────────
     approvals_created = []
 
-    # 1. Post LinkedIn → approval
+    # 1. Post LinkedIn → approval + token
     if post and not post.startswith("[Erreur"):
         with db_conn() as conn:
             cur = db_insert(conn,
                 "INSERT INTO pending_approvals(type,title,preview,payload,status) VALUES(?,?,?,?,?)",
                 ("linkedin_post", f"Post LinkedIn: {topic}", post[:200],
                  json.dumps({"content": post, "topic": topic, "format": fmt}), "pending"))
-            approvals_created.append({"type": "linkedin_post", "id": cur.lastrowid, "title": f"Post LinkedIn: {topic}"})
+            aid = cur.lastrowid
+            token = _make_approval_token(aid)
+            db_exec(conn, "UPDATE pending_approvals SET token=? WHERE id=?", (token, aid))
+        approvals_created.append({"type": "linkedin_post", "id": aid, "title": f"Post LinkedIn: {topic}",
+                                   "preview": post[:200], "token": token})
 
-    # 2. Candidatures pour offres score ≥ 60 → approvals (sans envoyer, PDF différé)
-    # CAP : max 3 candidatures par run pour éviter timeout Render (30s)
+    # 2. Candidatures score ≥ 60 → approvals + tokens (PDF différé)
     candidatures_this_run = 0
     for entry in analyzed:
         if candidatures_this_run >= 3:
@@ -1493,8 +1686,7 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
                 apply_result = await run_auto_apply(
                     entry["offer_id"], entry.get("title",""),
                     entry.get("company",""), entry.get("description",""),
-                    entry, entry.get("company_email",""),
-                    defer_pdf=True   # PDF généré à l'approbation, pas maintenant
+                    entry, entry.get("company_email",""), defer_pdf=True
                 )
                 with db_conn() as conn:
                     cur = db_insert(conn,
@@ -1510,76 +1702,45 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
                                      "company_email": entry.get("company_email",""),
                                      "score": entry.get("match_score",0)}),
                          "pending"))
-                    approvals_created.append({"type": "candidature", "id": cur.lastrowid,
-                                              "title": f"Candidature: {entry.get('title','')} ({entry.get('match_score',0)}%)"})
+                    aid = cur.lastrowid
+                    token = _make_approval_token(aid)
+                    db_exec(conn, "UPDATE pending_approvals SET token=? WHERE id=?", (token, aid))
+                approvals_created.append({
+                    "type": "candidature", "id": aid, "token": token,
+                    "title": f"Candidature: {entry.get('title','')} ({entry.get('match_score',0)}%)",
+                    "preview": apply_result.get("email_body","")[:200],
+                    "score": entry.get("match_score",0),
+                })
                 candidatures_this_run += 1
             except Exception as e:
                 logger.error(f"Approval candidature error: {e}")
 
-    # ── Email récap avec lien vers dashboard validation ─────────────────
+    top = top3[0] if top3 else {}
+
+    # ── Notification multi-canal (Email + WhatsApp + SMS) ──────────────
     digest_sent = False
-    if COPILOT_EMAIL and EMAIL_PROVIDER != "none":
-        try:
-            offers_html = "".join(
-                f"<div style='border-left:4px solid "
-                f"{'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'};"
-                f"padding:10px 14px;margin-bottom:8px;background:#F9FAFB'>"
-                f"<strong>{o.get('title','')}</strong> "
-                f"<span style='color:{'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'}'>"
-                f"{o.get('match_score',0)}%</span><br>"
-                f"<small>{o.get('company','')} | TJM: {o.get('tjm_negotiate','?')}</small><br>"
-                f"<small>{o.get('match_reason','')}</small></div>"
-                for o in top3
-            )
-            approvals_html = "".join(
-                f"<div style='padding:8px 12px;margin-bottom:6px;background:#EEF2FF;border-radius:6px;font-size:13px'>"
-                f"{'📝' if a['type']=='linkedin_post' else '📨'} {a['title']}</div>"
-                for a in approvals_created
-            )
-            render_host = os.getenv("RENDER_EXTERNAL_URL", os.getenv("FLY_APP_NAME", ""))
-            _default_url = f"https://{render_host}/dashboard" if render_host and not render_host.startswith("http") else (render_host + "/dashboard" if render_host else "https://datalinkedai.onrender.com/dashboard")
-            dashboard_url = os.getenv("DASHBOARD_URL", _default_url)
-            body_html = f"""<html><body style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px'>
-<div style='background:linear-gradient(135deg,#1A56FF,#7C3AED);padding:20px;border-radius:12px;margin-bottom:20px'>
-<p style='color:rgba(255,255,255,.7);font-size:11px;margin:0'>COPILOT QUOTIDIEN</p>
-<h2 style='color:white;margin:4px 0 0'>Brief data du {now_str}</h2>
-<p style='color:rgba(255,255,255,.8);font-size:13px;margin:8px 0 0'>{len(approvals_created)} element(s) en attente de validation</p>
-</div>
-<h3 style='color:#1A56FF'>En attente de ta validation</h3>
-{approvals_html}
-<div style='text-align:center;margin:24px 0'>
-<a href='{dashboard_url}' style='background:linear-gradient(135deg,#1A56FF,#7C3AED);color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px'>
-Valider depuis le Dashboard
-</a>
-</div>
-<h3>Top offres analysees</h3>{offers_html}
-<hr style='border:none;border-top:1px solid #eee;margin:20px 0'>
-<h3>Post LinkedIn (en attente validation)</h3>
-<div style='background:#F4F6FB;padding:14px;border-radius:8px;font-size:13px;white-space:pre-wrap'>{post[:300]}...</div>
-<p style='color:#aaa;font-size:11px;text-align:center;margin-top:20px'>DataLinkedAI v3.0 | Sekouna KABA</p>
-</body></html>"""
-            body_text = f"Brief {now_str} - {len(approvals_created)} element(s) a valider\n\n"
-            body_text += "\n".join(f"- {a['title']}" for a in approvals_created)
-            body_text += f"\n\nValider: {dashboard_url}"
-            await send_email(COPILOT_EMAIL, "Sekouna",
-                             f"[Validation] {len(approvals_created)} element(s) en attente - {now_str}",
-                             body_html, body_text)
-            digest_sent = True
-        except Exception as e:
-            logger.error(f"Digest error: {e}")
-
-    top = top3[0] if top3 else {}  # FIX: défini AVANT notify() qui l'utilise
-
-    # Notification push — résumé copilot
+    notif_results = {}
     if approvals_created:
-        await notify(
-            f"DataLinkedAI — {len(approvals_created)} element(s) a valider",
-            f"{len([a for a in approvals_created if a['type']=='candidature'])} candidature(s) + "
-            f"{len([a for a in approvals_created if a['type']=='linkedin_post'])} post LinkedIn "
-            f"en attente. Top score: {top.get('match_score', 0)}%",
-            url=DASHBOARD_URL,
-            priority=0
+        offers_html = "".join(
+            f"<div style='border-left:4px solid {'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'};"
+            f"padding:10px 14px;margin-bottom:8px;background:#F9FAFB'>"
+            f"<strong>{o.get('title','')}</strong> "
+            f"<span style='color:{'#00B96B' if o.get('match_score',0)>=85 else '#F59E0B'}'>"
+            f"{o.get('match_score',0)}%</span><br>"
+            f"<small>{o.get('company','')} | TJM: {o.get('tjm_negotiate','?')}</small><br>"
+            f"<small>{o.get('match_reason','')}</small></div>"
+            for o in top3
         )
+        try:
+            notif_results = await notify_all(
+                approvals_created, offers_html=offers_html,
+                post_preview=post if not post.startswith("[Erreur") else "",
+                now_str=now_str,
+            )
+            digest_sent = "email" in notif_results and "✅" in notif_results.get("email","")
+        except Exception as e:
+            logger.error(f"notify_all error: {e}")
+
     with db_conn() as conn:
         db_exec(conn,
             "INSERT INTO copilot_runs(offers_found,top_offer,top_score,post_topic,digest_sent,auto_applied) VALUES(?,?,?,?,?,?)",
@@ -1587,6 +1748,7 @@ Valider depuis le Dashboard
     log_act("🌅", f"{len(analyzed)} offres analysees, top {top.get('match_score',0)}%", "copilot")
     return {"offers_analyzed": len(analyzed), "top_offers": top3, "post_topic": topic,
             "auto_applied": auto_applied, "digest_sent": digest_sent,
+            "notifications": notif_results,
             "scraping": "apify" if APIFY_TOKEN else "mock"}
 
 # ══════════════════════════════════════════════════════
@@ -1609,26 +1771,27 @@ async def run_auto_apply(offer_id, title, company, description, analysis, compan
     _exps  = PROFILE.get("experiences", [])
     _recent_co = ", ".join([e.get("company","") for e in _exps[:3]]) if _exps else "mes missions récentes"
     _tjm   = f"{PROFILE.get('tjm_min',500)}-{PROFILE.get('tjm_max',900)}€"
+    _skills_str = ", ".join(PROFILE.get("skills",[])[:10])
+    _certs_str  = ", ".join(PROFILE.get("certifications",[])[:4])
 
-    cv = await ask_json(f"""Tu es un expert RH. Génère un CV JSON complet et percutant pour {_name}.
-
-PROFIL COMPLET:
-{json.dumps(PROFILE)}
-
-OFFRE CIBLÉE: {description[:1000]}
-
-INSTRUCTIONS:
-- title_adapted: titre qui correspond exactement à l'offre
-- accroche: 3-4 phrases impactantes à la 1ère personne avec chiffres et missions réelles ({_recent_co})
-- competences_core: 6-8 compétences principales liées à l'offre
-- competences_secondaires: 6-8 compétences complémentaires
-- kpis: 3 chiffres clés percutants tirés du profil
-- experiences: TOUTES les expériences avec missions détaillées, stack, résultats mesurables
-- tjm_suggest: TJM entre {_tjm} adapté à l'offre
-
-JSON EXACT:
-{{"title_adapted":"<titre>","accroche":"<3-4 phrases>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":["<c1>","<c2>","<c3>","<c4>","<c5>","<c6>"],"competences_secondaires":["<c1>","<c2>","<c3>","<c4>","<c5>"],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre>","context":"<contexte>","missions":["<mission>","<mission>","<mission>","<mission>"],"stack":"<tech1, tech2>"}}],"formations":[{{"diplome":"<titre>","ecole":"<école>","annee":"<année>"}}],"certifications":["<cert1>","<cert2>"],"langues":[{{"langue":"<langue>","niveau":"<niveau>"}}],"soft_skills":["<skill1>","<skill2>","<skill3>","<skill4>"],"tjm_suggest":"<TJM>€/j"}}
-JSON seul.""", 1800)
+    # Prompt compact pour éviter truncature sur modèles limités (Groq 8k)
+    cv = await ask_json(f"""Expert RH. CV JSON pour {_name} ({_title}).
+Profil: {json.dumps({k:v for k,v in PROFILE.items() if k not in ['bio','keywords']}, ensure_ascii=False)[:1200]}
+Offre cible: {description[:600]}
+Réponds UNIQUEMENT avec ce JSON (complète chaque champ) :
+{{"title_adapted":"<titre adapté à l offre>","accroche":"<3 phrases percutantes 1ère personne, missions: {_recent_co}>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":[<liste 6 skills de {_skills_str} liés à l offre>],"competences_secondaires":[<liste 5 autres skills>],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre>","context":"<1 phrase>","missions":["<mission>","<mission>","<mission>"],"stack":"<techs>"}}],"formations":[{{"diplome":"<diplôme>","ecole":"<école>","annee":"<année>"}}],"certifications":[{_certs_str!r}],"langues":[{{"langue":"Français","niveau":"Natif"}}],"soft_skills":["<s1>","<s2>","<s3>","<s4>"],"tjm_suggest":"<TJM {_tjm}>€/j"}}
+JSON seul.""", 2000, fallback={
+        "title_adapted": title, "accroche": f"{_name}, {_title}.",
+        "kpis": ["Expérience confirmée","Missions réussies","Disponible rapidement"],
+        "competences_core": PROFILE.get("skills",[])[:6],
+        "competences_secondaires": PROFILE.get("skills",[])[6:11],
+        "experiences": _exps[:3],
+        "formations": PROFILE.get("formations",[]),
+        "certifications": PROFILE.get("certifications",[]),
+        "langues": [{"langue":"Français","niveau":"Natif"}],
+        "soft_skills": ["Autonomie","Rigueur","Communication","Adaptabilité"],
+        "tjm_suggest": f"{PROFILE.get('tjm_max',700)}€/j",
+    })
 
     # FIX-C : génération PDF async — différée si mode copilot (évite timeout Render 30s)
     if defer_pdf:
@@ -2201,6 +2364,86 @@ async def list_offers(limit: int = 50, offset: int = 0, _=Depends(verify_api_key
              "url": r[7], "created_at": str(r[8]),
              "description": r[9] or ""} for r in rows]}
 
+@app.post("/api/offers/scrape", tags=["Offres Freelance"])
+async def scrape_and_analyze_now(request: Request, _=Depends(verify_api_key)):
+    """Lance un scraping immédiat + analyse IA de chaque offre. Stocke en DB."""
+    _check_rate(request, "offers_scrape", 3, 3600)
+    raw = await get_offers_today()
+    analyzed = []
+    name  = PROFILE.get("name","Candidat")
+    title = PROFILE.get("title","Consultant")
+    tjm_min = PROFILE.get("tjm_min",300); tjm_max = PROFILE.get("tjm_max",900)
+    for raw_o in raw[:12]:
+        try:
+            result = await ask_json(
+                f"""{name} — {title}. TJM {tjm_min}-{tjm_max}€. Compétences: {", ".join(PROFILE.get("skills",[])[:8])}
+Offre: {raw_o.get("description","")[:600]}
+JSON:{{"match_score":<0-100>,"tjm_negotiate":"<TJM>","urgency":"<Postuler maintenant/Peut attendre>","match_reason":"<raison>","key_techs":["<t1>","<t2>"]}}
+JSON seul.""", 400, fallback={"match_score":50,"tjm_negotiate":f"{tjm_max}€/j","urgency":"Peut attendre","match_reason":"","key_techs":[]})
+            score = result.get("match_score",0)
+            with db_conn() as conn:
+                db_insert(conn,
+                    "INSERT OR IGNORE INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status,url) VALUES(?,?,?,?,?,?,?,?)",
+                    (raw_o.get("title",""), raw_o.get("source","scraper"),
+                     raw_o.get("description","")[:1000], score,
+                     result.get("tjm_negotiate",""), result.get("urgency",""),
+                     "analyzed", raw_o.get("url","")))
+            analyzed.append({**raw_o, **result})
+        except Exception as e:
+            logger.debug(f"Analyze offer error: {e}")
+            analyzed.append(raw_o)
+    log_act("🕷️", f"Scraping live: {len(analyzed)} offres", "scraping")
+    return {"count": len(analyzed), "offers": sorted(analyzed, key=lambda x: x.get("match_score",0), reverse=True)}
+
+class EnrichReq(BaseModel):
+    company: str
+    offer_text: str = ""
+
+@app.post("/api/offers/enrich-contact", tags=["Offres Freelance"])
+async def enrich_contact(req: EnrichReq, _=Depends(verify_api_key)):
+    """Enrichit automatiquement le contact recruteur depuis le nom de l'entreprise + texte offre."""
+    result = {"company": req.company, "email": "", "linkedin": "", "source": ""}
+
+    # 1. Extraire email directement dans le texte de l'offre
+    if req.offer_text:
+        emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', req.offer_text)
+        if emails:
+            result["email"] = emails[0]
+            result["source"] = "extracted_from_offer"
+
+    # 2. Extraire URL LinkedIn de l'offre
+    if req.offer_text:
+        li = re.findall(r'linkedin\.com/in/[\w-]+', req.offer_text)
+        if li:
+            result["linkedin"] = "https://www." + li[0]
+
+    # 3. Hunter.io si pas d'email trouvé
+    if not result["email"] and req.company and HUNTER_API_KEY:
+        found = await enrich_company_email(req.company)
+        if found:
+            result["email"] = found
+            result["source"] = "hunter_io"
+
+    # 4. Guess pattern basique si domaine connu
+    if not result["email"] and req.company:
+        domain_guess = req.company.lower().replace(" ","-").replace("&","").replace("'","")[:30] + ".com"
+        result["email_guess"] = f"contact@{domain_guess}"
+        result["source"] = result["source"] or "guess"
+
+    # 5. IA : extraire infos de contact du texte de l'offre
+    if req.offer_text and not result["email"]:
+        contact_info = await ask_json(
+            f"""Extrais les infos de contact depuis ce texte d'offre.
+Texte: {req.offer_text[:800]}
+JSON:{{"email":"<email ou vide>","nom_recruteur":"<nom ou vide>","entreprise":"<entreprise exacte>","linkedin":"<url linkedin ou vide>","telephone":"<tel ou vide>"}}
+JSON seul.""", 300, fallback={"email":"","nom_recruteur":"","entreprise":req.company,"linkedin":"","telephone":""})
+        for k in ["email","nom_recruteur","linkedin","telephone"]:
+            if contact_info.get(k) and not result.get(k):
+                result[k] = contact_info[k]
+                if k == "email": result["source"] = "ai_extracted"
+
+    return result
+
 # ── CV ───────────────────────────────────────────────
 class CVReq(BaseModel):
     offer_text: str
@@ -2754,54 +2997,66 @@ class AutoApplyReq(BaseModel):
 @app.post("/api/agent/apply", tags=["Agent Candidature Auto"])
 async def agent_apply(req: AutoApplyReq, request: Request, _=Depends(verify_api_key)):
     _check_rate(request, "agent_apply", 20, 3600)
-    _rate_limit(request, max_calls=10, window_seconds=3600)  # 10 candidatures/heure
-    analysis = await ask_json(f"""{PROFILE.get("name","Candidat")} {PROFILE.get("title","Consultant freelance")}. TJM {PROFILE.get("tjm_min",500)}-{PROFILE.get("tjm_max",900)}€.
-{json.dumps(PROFILE)}\nOffre: {req.description}
-JSON:{{"match_score":<0-100>,"tjm_negotiate":"<TJM 500-900euro>",
-"urgency":"<Postuler maintenant/Peut attendre>","match_reason":"<raison>"}}
-JSON seul.""", 500)
-    score = analysis.get("match_score", 0)
-    if score < 60:
-        return {"match_score": score, "decision": "Score trop faible (<60%) — pas de candidature générée",
-                "analysis": analysis}
-    # FIX: cree un offer_id reel via context manager (jamais 0)
-    with db_conn() as _oc:
-        _ocur = db_insert(_oc, "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status) VALUES(?,?,?,?,?,?,?)",
-            (req.offer_title,"manual",req.description[:1000],score,analysis.get("tjm_negotiate",""),analysis.get("urgency",""),"analyzed"))
-        offer_id = _ocur.lastrowid
-    result = await run_auto_apply(offer_id, req.offer_title, req.company, req.description, analysis, req.company_email or "")
-    if (AUTO_APPLY_ENABLED or req.force_send) and req.company_email:
-        # pdf_bytes récupéré depuis la DB (result ne contient plus de bytes bruts)
-        _pdf_b64 = result.get("pdf_b64") or ""
+    _rate_limit(request, max_calls=10, window_seconds=3600)
+    try:
+        analysis = await ask_json(f"""{PROFILE.get("name","Candidat")} {PROFILE.get("title","Consultant freelance")}. TJM {PROFILE.get("tjm_min",500)}-{PROFILE.get("tjm_max",900)}€.
+Profil compétences: {", ".join(PROFILE.get("skills",[])[:8])}
+Offre: {req.description[:800]}
+JSON:{{"match_score":<0-100>,"tjm_negotiate":"<TJM recommandé>","urgency":"<Postuler maintenant/Peut attendre>","match_reason":"<raison courte>"}}
+JSON seul.""", 600, fallback={"match_score": 75, "tjm_negotiate": f"{PROFILE.get('tjm_max',700)}€/j", "urgency": "Postuler maintenant", "match_reason": "Profil compatible"})
+        score = analysis.get("match_score", 0)
+        if score < 60:
+            return {"match_score": score, "decision": "Score trop faible (<60%) — pas de candidature générée", "analysis": analysis}
+    except Exception as e:
+        logger.error(f"agent_apply analysis error: {e}")
+        analysis = {"match_score": 75, "tjm_negotiate": f"{PROFILE.get('tjm_max',700)}€/j", "urgency": "Postuler maintenant", "match_reason": "Analyse partielle"}
+        score = 75
+
+    try:
+        # Enrichir email si pas fourni
+        company_email = req.company_email or ""
+        if not company_email and req.company and HUNTER_API_KEY:
+            company_email = await enrich_company_email(req.company) or ""
+        if not company_email:
+            # Extraire email depuis le texte de l'offre
+            email_matches = re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', req.description)
+            if email_matches:
+                company_email = email_matches[0]
+                log_act("🔍", f"Email extrait de l'offre: {company_email}", "agent")
+
+        with db_conn() as _oc:
+            _ocur = db_insert(_oc,
+                "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status) VALUES(?,?,?,?,?,?,?)",
+                (req.offer_title,"manual",req.description[:1000],score,
+                 analysis.get("tjm_negotiate",""),analysis.get("urgency",""),"analyzed"))
+            offer_id = _ocur.lastrowid
+
+        result = await run_auto_apply(offer_id, req.offer_title, req.company, req.description, analysis, company_email)
+    except Exception as e:
+        logger.error(f"agent_apply CV/email generation error: {e}", exc_info=True)
+        raise HTTPException(500, f"Erreur génération candidature: {str(e)[:200]}. Vérifie ta clé IA (GROQ_API_KEY / OPENAI_API_KEY) et que le profil est rempli.")
+
+    if (AUTO_APPLY_ENABLED or req.force_send) and company_email:
         try:
             with db_conn() as _pc:
                 _pr = db_exec(_pc, "SELECT cv_pdf_b64 FROM auto_applications WHERE id=?", (result["app_id"],)).fetchone()
-                _pdf_b64 = _pr[0] if _pr and _pr[0] else _pdf_b64
-        except Exception:
-            pass
-        pdf_bytes = base64.b64decode(_pdf_b64) if _pdf_b64 else b""
-        body_html = make_html_email(result.get("email_body", ""))
-        att_name  = f"CV_{PROFILE.get('name','Candidat').replace(' ','_')}_{req.offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
-        # ── Envoi isolé du update DB ──
-        try:
-            await send_email(req.company_email, req.company or "Recruteur",
-                             result.get("subject", "Candidature freelance Data"),
-                             body_html, result.get("email_body", ""),
+                _pdf_b64 = _pr[0] if _pr and _pr[0] else ""
+            pdf_bytes = base64.b64decode(_pdf_b64) if _pdf_b64 else b""
+            body_html = make_html_email(result.get("email_body",""))
+            _cname = PROFILE.get("name","Candidat").replace(" ","_")
+            att_name = f"CV_{_cname}_{req.offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+            await send_email(company_email, req.company or "Recruteur",
+                             result.get("subject","Candidature freelance"),
+                             body_html, result.get("email_body",""),
                              att_bytes=pdf_bytes or None, att_name=att_name)
-            result["email_sent"]   = True
-            result["pdf_attached"] = bool(pdf_bytes)
+            result["email_sent"] = True; result["pdf_attached"] = bool(pdf_bytes)
+            with db_conn() as conn:
+                db_exec(conn, "UPDATE auto_applications SET status='sent', applied_at=? WHERE id=?",
+                        (datetime.now().isoformat(), result["app_id"]))
         except Exception as e:
             result["email_error"] = str(e)
-        # ── Update DB seulement si l'envoi a réussi ──
-        if result.get("email_sent"):
-            try:
-                with db_conn() as conn:
-                    db_exec(conn,
-                        "UPDATE auto_applications SET status='sent', applied_at=? WHERE id=?",
-                        (datetime.now().isoformat(), result["app_id"]))
-            except Exception as db_err:
-                logger.error(f"agent_apply DB update failed (email was sent): {db_err}")
-    return {**analysis, **result, "auto_apply_active": AUTO_APPLY_ENABLED or req.force_send}
+    return {**analysis, **result, "auto_apply_active": AUTO_APPLY_ENABLED or req.force_send,
+            "company_email_used": company_email or ""}
 
 
 @app.get("/api/agent/applications/export-csv", tags=["Agent Candidature Auto"])
@@ -3011,6 +3266,139 @@ async def reject_item(approval_id: int, _=Depends(verify_api_key)):
         db_exec(conn, "UPDATE pending_approvals SET status='rejected' WHERE id=?", (approval_id,))
     log_act("x", f"Rejete: {row[1]}", "validation")
     return {"status": "rejected", "type": row[0], "title": row[1]}
+
+# ── Endpoints publics validation en 1 clic (depuis email/WhatsApp/SMS) ──
+_CONFIRM_HTML = lambda action, icon, title, msg, color, dashboard_url: f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DataLinkedAI — {action}</title>
+<style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
+.card{{background:white;border-radius:16px;padding:40px 32px;max-width:480px;width:100%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.1)}}
+.icon{{font-size:56px;margin-bottom:16px}}.title{{font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:8px}}
+.msg{{font-size:14px;color:#666;line-height:1.6;margin-bottom:24px}}.item{{background:#f0f4ff;border-radius:8px;padding:12px 16px;font-size:13px;color:#333;margin-bottom:20px;text-align:left;border-left:3px solid {color}}}
+.btn{{display:inline-block;background:{color};color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px}}</style>
+</head><body><div class="card">
+<div class="icon">{icon}</div>
+<div class="title">{action}</div>
+<div class="item">{title}</div>
+<div class="msg">{msg}</div>
+<a href="{dashboard_url}" class="btn">📊 Voir le Dashboard</a>
+</div></body></html>"""
+
+@app.get("/approve/{approval_id}/{token}", tags=["Validation publique"], include_in_schema=False)
+async def public_approve(approval_id: int, token: str):
+    """Approbation en 1 clic depuis email/SMS/WhatsApp — sans authentification."""
+    if not _verify_approval_token(approval_id, token):
+        return HTMLResponse("<h2>❌ Lien invalide ou expiré.</h2>", status_code=403)
+    with db_conn() as conn:
+        row = db_exec(conn, "SELECT type,title,payload,status FROM pending_approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        return HTMLResponse("<h2>❌ Élément introuvable.</h2>", status_code=404)
+    if row[3] != "pending":
+        return HTMLResponse(_CONFIRM_HTML("Déjà traité","ℹ️", row[1], f"Cet élément a déjà été {row[3]}.", "#888", DASHBOARD_URL), status_code=200)
+    # Exécuter l'approbation
+    try:
+        item_type = row[0]; payload = json.loads(row[2]) if row[2] else {}
+        result_msg = ""
+        if item_type == "linkedin_post":
+            content = payload.get("content",""); topic = payload.get("topic","")
+            pub = await linkedin_publish(content) if content else {}
+            with db_conn() as conn:
+                db_exec(conn, "UPDATE linkedin_posts SET status='published' WHERE content=?", (content,))
+                db_exec(conn, "UPDATE pending_approvals SET status='approved', approved_at=CURRENT_TIMESTAMP WHERE id=?", (approval_id,))
+            result_msg = "Post publié sur LinkedIn ✅" if pub.get("success") else "Post validé — publication manuelle requise"
+            log_act("💼", f"Post approuvé (1-clic): {topic}", "validation")
+        elif item_type == "candidature":
+            app_id = payload.get("app_id"); company = payload.get("company","Recruteur")
+            subject = payload.get("subject","Candidature"); email_body = payload.get("email_body","")
+            offer_title = payload.get("offer_title",""); company_email = payload.get("company_email","")
+            with db_conn() as conn:
+                app_row = db_exec(conn, "SELECT cv_pdf_b64,company_email FROM auto_applications WHERE id=?", (app_id,)).fetchone()
+            to_email = (app_row[1] if app_row else "") or company_email
+            pdf_b64  = app_row[0] if app_row else ""
+            if not pdf_b64:
+                _p = PROFILE; cv_data = {
+                    "title_adapted": offer_title, "accroche": _p.get("bio",""),
+                    "kpis": _p.get("kpis",["Expérience confirmée"]),
+                    "competences_core": _p.get("skills",[])[:8],
+                    "competences_secondaires": _p.get("skills",[])[8:14],
+                    "experiences": _p.get("experiences",[]),
+                    "formations": _p.get("formations",[]),
+                    "certifications": _p.get("certifications",[]),
+                    "langues": [{"langue":"Français","niveau":"Natif"}],
+                    "soft_skills": ["Autonomie","Rigueur","Communication","Adaptabilité"],
+                    "tjm_suggest": f"{_p.get('tjm_max',700)}€/j",
+                }
+                pdf_bytes_gen = await generate_cv_pdf(cv_data, offer_title)
+                pdf_b64 = base64.b64encode(pdf_bytes_gen).decode() if pdf_bytes_gen else ""
+                if pdf_b64:
+                    with db_conn() as conn:
+                        db_exec(conn, "UPDATE auto_applications SET cv_pdf_b64=? WHERE id=?", (pdf_b64, app_id))
+            if to_email and EMAIL_PROVIDER != "none":
+                pdf_bytes = base64.b64decode(pdf_b64) if pdf_b64 else b""
+                cname = PROFILE.get("name","Candidat").replace(" ","_")
+                att = f"CV_{cname}_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+                await send_email(to_email, company, subject, make_html_email(email_body), email_body,
+                                 att_bytes=pdf_bytes or None, att_name=att)
+                with db_conn() as conn:
+                    db_exec(conn, "UPDATE auto_applications SET status='sent', applied_at=CURRENT_TIMESTAMP WHERE id=?", (app_id,))
+                result_msg = f"Email envoyé à {to_email} avec CV PDF ✅"
+            else:
+                with db_conn() as conn:
+                    db_exec(conn, "UPDATE auto_applications SET status='approved' WHERE id=?", (app_id,))
+                result_msg = "Candidature approuvée — configure l'email pour l'envoi auto"
+            with db_conn() as conn:
+                db_exec(conn, "UPDATE pending_approvals SET status='approved', approved_at=CURRENT_TIMESTAMP WHERE id=?", (approval_id,))
+            log_act("✅", f"Candidature approuvée (1-clic): {offer_title}", "validation")
+        return HTMLResponse(_CONFIRM_HTML("Validé !", "✅", row[1], result_msg, "#00B96B", DASHBOARD_URL))
+    except Exception as e:
+        logger.error(f"public_approve error: {e}", exc_info=True)
+        return HTMLResponse(f"<h2>❌ Erreur: {e}</h2>", status_code=500)
+
+@app.get("/reject/{approval_id}/{token}", tags=["Validation publique"], include_in_schema=False)
+async def public_reject(approval_id: int, token: str):
+    """Rejet en 1 clic depuis email/SMS/WhatsApp — sans authentification."""
+    if not _verify_approval_token(approval_id, token):
+        return HTMLResponse("<h2>❌ Lien invalide ou expiré.</h2>", status_code=403)
+    with db_conn() as conn:
+        row = db_exec(conn, "SELECT type,title,status FROM pending_approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        return HTMLResponse("<h2>❌ Élément introuvable.</h2>", status_code=404)
+    if row[2] != "pending":
+        return HTMLResponse(_CONFIRM_HTML("Déjà traité","ℹ️", row[1], f"Cet élément a déjà été {row[2]}.", "#888", DASHBOARD_URL))
+    with db_conn() as conn:
+        db_exec(conn, "UPDATE pending_approvals SET status='rejected', rejected_at=CURRENT_TIMESTAMP WHERE id=?", (approval_id,))
+    log_act("❌", f"Rejeté (1-clic): {row[1]}", "validation")
+    return HTMLResponse(_CONFIRM_HTML("Rejeté", "❌", row[1], "Élément rejeté. Aucun envoi effectué.", "#EF4444", DASHBOARD_URL))
+
+@app.post("/api/notifications/test", tags=["Notifications"])
+async def test_notifications(_=Depends(verify_api_key)):
+    """Envoie une notification de test sur tous les canaux configurés."""
+    test_approval = [{
+        "type": "test", "id": 0, "token": "test-token",
+        "title": "🧪 Test notification DataLinkedAI",
+        "preview": "Si tu reçois ce message, les notifications fonctionnent correctement !",
+        "score": 99,
+    }]
+    results = await notify_all(test_approval, now_str=datetime.now().strftime("%A %d %B %Y"))
+    channels = {
+        "email":     bool(COPILOT_EMAIL and EMAIL_PROVIDER != "none"),
+        "whatsapp":  bool(TWILIO_SID and NOTIF_WHATSAPP),
+        "sms":       bool(TWILIO_SID and NOTIF_PHONE),
+        "pushover":  bool(PUSHOVER_TOKEN and PUSHOVER_USER),
+    }
+    return {"channels_configured": channels, "channels_active": NOTIF_CHANNELS, "results": results}
+
+@app.get("/api/notifications/status", tags=["Notifications"])
+async def notification_status(_=Depends(verify_api_key)):
+    """Statut de configuration des canaux de notification."""
+    return {
+        "channels_active": NOTIF_CHANNELS,
+        "email":    {"configured": bool(COPILOT_EMAIL and EMAIL_PROVIDER != "none"), "address": COPILOT_EMAIL, "provider": EMAIL_PROVIDER},
+        "whatsapp": {"configured": bool(TWILIO_SID and NOTIF_WHATSAPP), "number": NOTIF_WHATSAPP or "Non configuré"},
+        "sms":      {"configured": bool(TWILIO_SID and NOTIF_PHONE), "number": NOTIF_PHONE or "Non configuré"},
+        "pushover": {"configured": bool(PUSHOVER_TOKEN and PUSHOVER_USER)},
+        "dashboard_url": DASHBOARD_URL,
+    }
 
 @app.get("/api/approvals/stats", tags=["Validation"])
 async def approval_stats(_=Depends(verify_api_key)):

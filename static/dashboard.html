@@ -310,14 +310,27 @@ textarea{min-height:90px}
 <div class="page" id="page-offers">
   <div class="section-header"><h2>📋 Offres Freelance</h2></div>
   <div class="tab-buttons">
-    <button class="tab-btn active" onclick="showTab('offers','analyze')">🔍 Analyser</button>
-    <button class="tab-btn" onclick="showTab('offers','list')">📋 Historique</button>
+    <button class="tab-btn active" onclick="showTab('offers','live');scrapeOffersLive()">🔴 Live (scraper)</button>
+    <button class="tab-btn" onclick="showTab('offers','analyze')">🔍 Analyser une offre</button>
+    <button class="tab-btn" onclick="showTab('offers','list');loadOffers()">📋 Historique DB</button>
   </div>
-  <div class="tab-panel active" id="tab-offers-analyze">
+  <div class="tab-panel active" id="tab-offers-live">
+    <div class="card" style="margin-bottom:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+        <div>
+          <h3 style="margin:0">🔴 Scraping en direct — 10 sources</h3>
+          <div id="scrape-live-status" style="font-size:.75rem;color:var(--dim);margin-top:.2rem">Lancement automatique...</div>
+        </div>
+        <button class="btn btn-primary" onclick="scrapeOffersLive()">🔄 Re-scraper maintenant</button>
+      </div>
+    </div>
+    <div id="offers-live-list"></div>
+  </div>
+  <div class="tab-panel" id="tab-offers-analyze">
     <div class="card">
       <h3>🔍 Analyser une offre</h3>
-      <div class="form-row"><label>Texte de l'offre (copie/colle directement depuis LinkedIn, Malt, etc.)</label>
-        <textarea id="offer-text" placeholder="Lead Data Architect freelance 12 mois remote. Snowflake, dbt Core, Airflow, Python, AWS. Architecture medallion..." rows="5"></textarea>
+      <div class="form-row"><label>Texte de l'offre (copie/colle depuis LinkedIn, Malt, etc.)</label>
+        <textarea id="offer-text" placeholder="Lead Data Architect freelance 12 mois remote. Snowflake, dbt Core, Airflow, Python, AWS..." rows="5"></textarea>
       </div>
       <button class="btn btn-primary" onclick="analyzeOffer()">⚡ Analyser l'offre</button>
     </div>
@@ -375,8 +388,20 @@ textarea{min-height:90px}
       <h3>✉️ Postuler à une offre</h3>
       <div class="form-grid">
         <div class="form-row"><label>Titre du poste</label><input type="text" id="agent-title" placeholder="Lead Data Architect Snowflake"></div>
-        <div class="form-row"><label>Entreprise</label><input type="text" id="agent-company" placeholder="FinTech Scale-up"></div>
-        <div class="form-row"><label>Email recruteur (optionnel — pour envoi direct)</label><input type="email" id="agent-email" placeholder="recruteur@entreprise.com"></div>
+        <div class="form-row"><label>Entreprise</label>
+          <div style="display:flex;gap:.4rem">
+            <input type="text" id="agent-company" placeholder="FinTech Scale-up" style="flex:1">
+            <button class="btn btn-secondary btn-sm" onclick="enrichContact()" title="Trouver le contact recruteur auto">🔍 Contact auto</button>
+          </div>
+        </div>
+        <div class="form-row"><label>Email recruteur
+          <span id="email-enrich-status" style="font-size:.7rem;color:var(--dim);margin-left:.4rem"></span>
+        </label>
+          <input type="email" id="agent-email" placeholder="recruteur@entreprise.com (trouvé auto si vide)">
+        </div>
+        <div class="form-row"><label>Nom du recruteur (optionnel)</label>
+          <input type="text" id="agent-recruiter-name" placeholder="Prénom Nom">
+        </div>
         <div class="form-row"><label>Forcer l'envoi si email fourni</label>
           <select id="agent-force"><option value="false">Non (garder en draft)</option><option value="true">Oui (envoyer maintenant)</option></select>
         </div>
@@ -387,6 +412,7 @@ textarea{min-height:90px}
         </label>
         <textarea id="agent-desc" placeholder="Colle ici la description complète de la mission (LinkedIn, Malt, Freelance.com...)&#10;&#10;Plus la description est détaillée, plus le CV et l'email seront adaptés précisément." rows="8" oninput="document.getElementById('agent-desc-chars').textContent=this.value.length+' caractères'"></textarea>
       </div>
+      <div id="enrich-result" style="margin-bottom:.75rem;font-size:.8rem"></div>
       <button class="btn btn-primary" onclick="agentApply()">🚀 Générer candidature + CV PDF</button>
     </div>
     <div id="agent-result"></div>
@@ -740,6 +766,48 @@ textarea{min-height:90px}
   </div>
 
   <!-- Scrapers -->
+  <div class="card" style="border-color:#25D366;background:linear-gradient(135deg,rgba(37,211,102,.04),white)">
+    <h3>🔔 Notifications — WhatsApp · SMS · Email</h3>
+    <p style="font-size:.8rem;color:var(--dim);margin-bottom:1rem">
+      Le Copilot t'envoie une notification dès qu'il y a des éléments à valider. Tu cliques <strong>✅ Valider</strong> ou <strong>❌ Rejeter</strong> directement depuis ton téléphone — sans ouvrir le dashboard.
+    </p>
+
+    <!-- Statut canaux -->
+    <div id="notif-status-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.6rem;margin-bottom:1rem">
+      <div class="skeleton" style="height:60px;border-radius:8px"></div>
+      <div class="skeleton" style="height:60px;border-radius:8px"></div>
+      <div class="skeleton" style="height:60px;border-radius:8px"></div>
+    </div>
+
+    <!-- Test en direct -->
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem">
+      <button class="btn btn-primary btn-sm" onclick="testNotifications()">📤 Envoyer une notification test</button>
+      <button class="btn btn-secondary btn-sm" onclick="loadNotifStatus()">🔄 Actualiser le statut</button>
+      <div id="notif-test-result" style="font-size:.8rem;color:var(--dim)"></div>
+    </div>
+
+    <!-- Instructions Twilio -->
+    <details style="margin-top:.5rem">
+      <summary style="cursor:pointer;font-size:.82rem;font-weight:600;color:var(--blue)">📱 Comment configurer WhatsApp / SMS (Twilio — gratuit)</summary>
+      <div style="margin-top:.75rem;font-size:.78rem;color:var(--ink2);line-height:1.7;background:var(--blue-soft);padding:1rem;border-radius:8px">
+        <strong>1. Compte Twilio (gratuit)</strong> → twilio.com → Console → Account SID + Auth Token<br>
+        <strong>2. WhatsApp Sandbox</strong> → Console → Messaging → Try it out → WhatsApp → Envoie le code depuis ton téléphone<br>
+        <strong>3. Variables à configurer :</strong><br>
+        <code style="background:rgba(0,0,0,.06);padding:2px 5px;border-radius:4px;font-size:.75rem">TWILIO_ACCOUNT_SID=ACxxx</code><br>
+        <code style="background:rgba(0,0,0,.06);padding:2px 5px;border-radius:4px;font-size:.75rem">TWILIO_AUTH_TOKEN=xxx</code><br>
+        <code style="background:rgba(0,0,0,.06);padding:2px 5px;border-radius:4px;font-size:.75rem">NOTIF_WHATSAPP=+33612345678</code> (ton numéro)<br>
+        <code style="background:rgba(0,0,0,.06);padding:2px 5px;border-radius:4px;font-size:.75rem">NOTIF_PHONE=+33612345678</code> (pour SMS)<br>
+        <code style="background:rgba(0,0,0,.06);padding:2px 5px;border-radius:4px;font-size:.75rem">NOTIF_CHANNELS=email,whatsapp,sms</code><br>
+        <br>
+        <strong>Comment ça marche :</strong><br>
+        ① Copilot scrape → analyse → génère CV + post<br>
+        ② Tu reçois un email/WhatsApp/SMS avec les éléments<br>
+        ③ Tu cliques ✅ ou ❌ depuis ton téléphone<br>
+        ④ L'envoi (email recruteur, post LinkedIn) se fait automatiquement<br>
+      </div>
+    </details>
+  </div>
+
   <div class="card">
     <h3>🕷️ Sources de Scraping (×10)</h3>
     <p style="font-size:.8rem;color:var(--dim);margin-bottom:1rem">Statuts en temps réel. Les sources en rouge ont échoué lors du dernier run.</p>
@@ -750,7 +818,7 @@ textarea{min-height:90px}
   </div>
 
   <div class="card">
-    <h3>📖 Variables d'environnement Railway / Railway</h3>
+    <h3>📖 Variables d'environnement</h3>
     <div class="output code">
 # ── IA (obligatoire : au moins une) ─────────────────────────────────
 GROQ_API_KEY=gsk_...             # Gratuit, rapide — groq.com
@@ -759,30 +827,38 @@ ANTHROPIC_API_KEY=sk-ant-...     # Claude Sonnet
 
 # ── Sécurité ─────────────────────────────────────────────────────────
 API_KEY=mon-secret-2025          # OBLIGATOIRE
+DASHBOARD_URL=https://datalinkedai.onrender.com/dashboard  # URL publique
 
 # ── Base de données ───────────────────────────────────────────────────
 DATABASE_URL=postgresql://postgres:[PASS]@db.[REF].supabase.co:5432/postgres
 
 # ── Email ────────────────────────────────────────────────────────────
-RESEND_API_KEY=re_...            # Gratuit 3000/mois
+RESEND_API_KEY=re_...            # Gratuit 3000/mois — resend.com
 GMAIL_USER=toi@gmail.com
 GMAIL_APP_PASS=xxxx xxxx xxxx
+COPILOT_EMAIL=toi@gmail.com      # Email qui reçoit le digest
+
+# ── Notifications WhatsApp / SMS ─────────────────────────────────────
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxx  # console.twilio.com
+TWILIO_AUTH_TOKEN=xxxxxxxx       # console.twilio.com
+NOTIF_WHATSAPP=+33612345678      # Ton numéro WhatsApp (sandbox Twilio gratuit)
+NOTIF_PHONE=+33612345678         # Ton numéro SMS
+NOTIF_CHANNELS=email,whatsapp    # Canaux actifs: email,whatsapp,sms,pushover
+APPROVAL_SECRET=mon-secret       # Optionnel — clé pour tokens validation
 
 # ── LinkedIn (publication auto) ────────────────────────────────────
 LINKEDIN_ACCESS_TOKEN=AQV...     # Token OAuth 60j
 LINKEDIN_PERSON_ID=ABC123xyz     # Ton ID LinkedIn
 LINKEDIN_AUTO_POST=true          # false = validation manuelle avant post
 LINKEDIN_POST_HOUR=9             # Heure de publication (9h par défaut)
-LINKEDIN_POST_DAYS=mon,wed,fri   # Jours de publication
 
 # ── Scraping ─────────────────────────────────────────────────────────
 APIFY_TOKEN=apify_api_...        # Optionnel — remplace les 10 scrapers
-ADZUNA_APP_ID=xxxxxx             # Optionnel — adzuna.com (gratuit)
+ADZUNA_APP_ID=xxxxxx             # adzuna.com (gratuit)
 ADZUNA_APP_KEY=xxxxxxxxxxxxxx
 SCRAPERS_ENABLED=wttj,indeed,remotive,freelance_com,adzuna,jobijoba,france_travail,hellowork,linkedin,remoteok
 
 # ── Copilot ──────────────────────────────────────────────────────────
-COPILOT_EMAIL=toi@email.com
 COPILOT_HOUR=8
 AUTO_APPLY=false
 AUTO_APPLY_MIN_SCORE=85
@@ -1038,13 +1114,13 @@ function go(page) {
   document.getElementById('tb-title').textContent = titles[page] || page;
   if(page === 'home') loadDashboard();
   if(page === 'copilot') { loadCopilotHistory(); loadCopilotConfig(); loadBackupList(); }
-  if(page === 'offers') loadOffers();
+  if(page === 'offers') scrapeOffersLive();
   if(page === 'agent') { loadAgentOfferPicker(); if(document.getElementById('tab-agent-apps').classList.contains('active')) loadApps(); }
   if(page === 'nego') loadNegoHistory();
   if(page === 'linkedin') loadPosts();
   if(page === 'email') loadEmailHistory();
   if(page === 'cv') loadCVHistory();
-  if(page === 'config') checkHealth();
+  if(page === 'config') { checkHealth(); loadNotifStatus(); loadScraperStats(); }
   if(page === 'validation') loadValidation();
   if(page === 'analytics') loadAnalytics();
   if(page === 'interview') loadInterviewSessions();
@@ -1727,14 +1803,104 @@ function swapDiagram(key) {
     </div>`;
 }
 
+async function scrapeOffersLive() {
+  const status = document.getElementById('scrape-live-status');
+  const list   = document.getElementById('offers-live-list');
+  if (status) status.textContent = '⏳ Scraping en cours sur 10 sources...';
+  if (list)   list.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)"><div class="spinner" style="margin:0 auto .75rem"></div>Interrogation de 10 plateformes simultanément...<br><small>WTTJ · Indeed · Remotive · Freelance.com · Adzuna · Jobijoba · France Travail · HelloWork · LinkedIn · RemoteOK</small></div>';
+  try {
+    const r = await api('POST', '/api/offers/scrape');
+    const offers = r.offers || [];
+    if (status) status.textContent = `✅ ${offers.length} offres trouvées — ${new Date().toLocaleTimeString('fr-FR')}`;
+    if (!list) return;
+    if (!offers.length) {
+      list.innerHTML = '<div class="empty"><div class="emoji">🔍</div><p>Aucune offre trouvée — vérifie les scrapers dans ⚙️ Config</p></div>';
+      return;
+    }
+    list.innerHTML = offers.map(o => {
+      const score = o.match_score || 0;
+      const scoreCls = score>=85?'badge-green':score>=65?'badge-amber':'badge-dim';
+      const safeTitle = (o.title||'').replace(/['"\\`]/g, '');
+      const safeComp  = (o.company||'').replace(/['"\\`]/g, '');
+      const safeDesc  = (o.description||'').replace(/['"\\`]/g, '');
+      return `<div class="card" style="margin-bottom:.6rem;padding:.9rem 1rem">
+        <div style="display:flex;gap:.75rem;align-items:flex-start">
+          <div style="flex-shrink:0">
+            <svg width="46" height="46" viewBox="0 0 52 52">
+              <circle cx="26" cy="26" r="22" fill="none" stroke="var(--border)" stroke-width="4"/>
+              <circle cx="26" cy="26" r="22" fill="none" stroke="${score>=85?'#00B96B':score>=65?'#F59E0B':'#7B8DB5'}" stroke-width="4"
+                stroke-dasharray="${Math.PI*44}" stroke-dashoffset="${Math.PI*44*(1-score/100)}" transform="rotate(-90 26 26)"/>
+              <text x="26" y="30" text-anchor="middle" font-size="10" font-weight="800" fill="${score>=85?'#00B96B':score>=65?'#F59E0B':'#7B8DB5'}">${score}%</text>
+            </svg>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:var(--font-head);font-weight:700;font-size:.9rem;margin-bottom:.2rem">${o.title||'-'}</div>
+            <div style="font-size:.75rem;color:var(--dim);margin-bottom:.35rem">
+              ${o.company?'<span>'+o.company+'</span>':''} ${o.source?'<span class="badge badge-dim" style="font-size:.65rem">'+o.source+'</span>':''} ${o.tjm_negotiate?'<span class="badge badge-blue" style="font-size:.65rem">'+o.tjm_negotiate+'</span>':''}
+            </div>
+            ${o.match_reason?'<div style="font-size:.75rem;color:var(--green);margin-bottom:.3rem">✅ '+o.match_reason+'</div>':''}
+            ${o.description?'<div style="font-size:.75rem;color:var(--ink2);max-height:50px;overflow:hidden">'+o.description.slice(0,180)+'...</div>':''}
+          </div>
+        </div>
+        <div style="display:flex;gap:.4rem;margin-top:.65rem;flex-wrap:wrap">
+          ${o.url?'<a href="'+o.url+'" target="_blank" class="btn btn-secondary btn-sm">🔗 Voir l\'offre</a>':''}
+          <button class="btn btn-primary btn-sm" onclick="prefillAgent('${safeTitle}','${safeComp}','')">🤖 Postuler</button>
+          <button class="btn btn-secondary btn-sm" onclick="enrichAndPrefill('${safeComp}','${safeDesc.slice(0,200)}','${safeTitle}')">🔍 Contact auto</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    if (status) status.textContent = `❌ Erreur: ${e.message}`;
+    if (list) list.innerHTML = `<div class="empty"><div class="emoji">❌</div><p>${e.message}</p></div>`;
+  }
+}
+
 async function loadOffers() {
   try {
     const res = await api('GET', '/api/offers');
     const rows = Array.isArray(res) ? res : (res.items || []);
     const el = document.getElementById('offers-list');
-    if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">📋</div><p>Aucune offre analysée</p></div>'; return; }
+    if (!rows.length) { el.innerHTML = '<div class="empty"><div class="emoji">📋</div><p>Aucune offre — utilise l\'onglet 🔴 Live pour scraper</p></div>'; return; }
     el.innerHTML = rows.map(o => offerRow(o)).join('');
   } catch(e) {}
+}
+
+// -- ENRICHISSEMENT CONTACT ----------------------------------------
+async function enrichContact() {
+  const company = document.getElementById('agent-company').value.trim();
+  const desc    = document.getElementById('agent-desc').value.trim();
+  const status  = document.getElementById('email-enrich-status');
+  const enOut   = document.getElementById('enrich-result');
+  if (!company && !desc) { toast('Remplis le nom de l\'entreprise ou la description', 'error'); return; }
+  if (status) status.textContent = '⏳ Recherche en cours...';
+  try {
+    const r = await api('POST', '/api/offers/enrich-contact', { company, offer_text: desc });
+    if (r.email) {
+      document.getElementById('agent-email').value = r.email;
+      if (status) status.textContent = `✅ Email trouvé (${r.source})`;
+    } else {
+      if (status) status.textContent = r.email_guess ? `💡 Suggestion: ${r.email_guess}` : '⚠️ Pas d\'email trouvé';
+      if (r.email_guess) {
+        const useIt = confirm(`Email trouvé par déduction: ${r.email_guess}\nVeux-tu l'utiliser ?`);
+        if (useIt) document.getElementById('agent-email').value = r.email_guess;
+      }
+    }
+    let enrichHtml = '';
+    if (r.nom_recruteur) { enrichHtml += `<span>👤 ${r.nom_recruteur}</span> `; document.getElementById('agent-recruiter-name').value = r.nom_recruteur; }
+    if (r.linkedin)   enrichHtml += `<a href="${r.linkedin}" target="_blank" style="color:var(--blue)">🔗 LinkedIn</a> `;
+    if (r.telephone)  enrichHtml += `<span>📞 ${r.telephone}</span>`;
+    if (enOut && enrichHtml) enOut.innerHTML = `<div style="background:var(--blue-soft);padding:.5rem .75rem;border-radius:var(--radius-sm)">🎯 ${enrichHtml}</div>`;
+  } catch(e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+async function enrichAndPrefill(company, desc, title) {
+  prefillAgent(title, company, '');
+  go('agent');
+  if (desc) document.getElementById('agent-desc').value = desc;
+  // Trigger enrich after a small delay
+  setTimeout(() => enrichContact(), 300);
 }
 
 // -- AGENT ---------------------------------------------------------
@@ -1919,7 +2085,7 @@ async function genPostFromSector() {
 }
 
 async function publishNow(btn, clipId) {
-  const content = _clipStore[clipId];
+  const content = _clip[clipId];
   if (!content) { toast('Contenu introuvable', 'error'); return; }
   btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Publication...';
   try {
@@ -2001,7 +2167,7 @@ async function loadLinkedInSchedule() {
 }
 
 async function publishScheduledNow(schedId, clipId) {
-  const content = _clipStore[clipId];
+  const content = _clip[clipId];
   if (!content) return;
   try {
     const r = await api('POST', '/api/linkedin/publish', { content, topic: '' });
@@ -2054,7 +2220,7 @@ async function loadPosts() {
 }
 
 async function quickPublish(clipId) {
-  const content = _clipStore[clipId];
+  const content = _clip[clipId];
   if (!content) { toast('Contenu introuvable', 'error'); return; }
   try {
     const r = await api('POST', '/api/linkedin/publish', { content });
@@ -2064,7 +2230,7 @@ async function quickPublish(clipId) {
 }
 
 function prefillSchedule(clipId) {
-  const content = _clipStore[clipId];
+  const content = _clip[clipId];
   if (content) {
     document.getElementById('sched-content').value = content;
     const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1); tomorrow.setHours(9,0,0,0);
@@ -2118,6 +2284,50 @@ async function loadLinkedInStatusBanner() {
       </div>`;
     }
   } catch(e) {}
+}
+
+// -- NOTIFICATIONS -------------------------------------------------
+async function loadNotifStatus() {
+  try {
+    const s = await api('GET', '/api/notifications/status');
+    const grid = document.getElementById('notif-status-grid');
+    if (!grid) return;
+    const channels = [
+      { key: 'email',    icon: '📧', label: 'Email', detail: s.email?.address || 'Non configuré' },
+      { key: 'whatsapp', icon: '💬', label: 'WhatsApp', detail: s.whatsapp?.number || 'Non configuré' },
+      { key: 'sms',      icon: '📱', label: 'SMS', detail: s.sms?.number || 'Non configuré' },
+    ];
+    const active = s.channels_active || [];
+    grid.innerHTML = channels.map(c => {
+      const configured = s[c.key]?.configured;
+      const isActive   = active.includes(c.key);
+      const status     = configured && isActive ? 'Actif ✅' : configured ? 'Configuré (inactif)' : 'Non configuré ⚠️';
+      const bg         = configured && isActive ? 'rgba(0,185,107,.08)' : configured ? 'rgba(245,158,11,.08)' : 'var(--bg)';
+      const border     = configured && isActive ? '#00B96B' : configured ? '#F59E0B' : 'var(--border)';
+      return `<div style="background:${bg};border:1.5px solid ${border};border-radius:8px;padding:.75rem">
+        <div style="font-size:1.2em;margin-bottom:.3rem">${c.icon}</div>
+        <div style="font-size:.8rem;font-weight:700">${c.label}</div>
+        <div style="font-size:.68rem;color:var(--dim)">${c.detail.slice(0,28)}</div>
+        <div style="font-size:.68rem;font-weight:600;margin-top:.2rem">${status}</div>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('loadNotifStatus:', e); }
+}
+
+async function testNotifications() {
+  const btn    = event.currentTarget;
+  const result = document.getElementById('notif-test-result');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Envoi...';
+  try {
+    const r = await api('POST', '/api/notifications/test');
+    const lines = Object.entries(r.results || {}).map(([k,v]) => `${k}: ${v}`).join(' · ');
+    if (result) result.innerHTML = `<span style="color:var(--green)">✅ ${lines || 'Envoyé'}</span>`;
+    toast('Notification test envoyée !', 'success');
+  } catch(e) {
+    if (result) result.innerHTML = `<span style="color:var(--red)">❌ ${e.message}</span>`;
+    toast('Erreur: ' + e.message, 'error');
+  }
+  btn.disabled = false; btn.innerHTML = '📤 Envoyer une notification test';
 }
 
 async function loadScraperStats() {
