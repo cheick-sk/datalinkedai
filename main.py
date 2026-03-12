@@ -96,6 +96,9 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 RESEND_API_KEY  = os.getenv("RESEND_API_KEY", "")
 GMAIL_USER      = os.getenv("GMAIL_USER", "")
 GMAIL_APP_PASS  = os.getenv("GMAIL_APP_PASS", "")
+GMAIL_IMAP_HOST = "imap.gmail.com"
+GMAIL_IMAP_PORT = 993
+GMAIL_CHECK_REPLIES = os.getenv("GMAIL_CHECK_REPLIES", "true").lower() == "true"
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Sekouna KABA — Data Architect")
 EMAIL_FROM_ADDR = os.getenv("EMAIL_FROM_ADDR", GMAIL_USER or "sekouna@datalinkedai.com")
 EMAIL_PROVIDER  = "resend" if RESEND_API_KEY else ("gmail" if GMAIL_USER and GMAIL_APP_PASS else "none")
@@ -105,8 +108,11 @@ COPILOT_HOUR         = int(os.getenv("COPILOT_HOUR", "8"))
 AUTO_APPLY_ENABLED   = os.getenv("AUTO_APPLY", "false").lower() == "true"
 AUTO_APPLY_MIN_SCORE = int(os.getenv("AUTO_APPLY_MIN_SCORE", "85"))
 FOLLOWUP_DAYS        = int(os.getenv("FOLLOWUP_DAYS", "5"))
+GMAIL_PARSE_ENABLED  = os.getenv("GMAIL_PARSE_ENABLED", "true").lower() == "true"  # Parsing réponses
 APIFY_TOKEN          = os.getenv("APIFY_TOKEN", "")
 PUSHOVER_TOKEN       = os.getenv("PUSHOVER_TOKEN", "")
+PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
+HUNTER_API_KEY       = os.getenv("HUNTER_API_KEY", "")   # hunter.io — 100 recherches/mois gratuit
 PUSHOVER_USER        = os.getenv("PUSHOVER_USER", "")
 DASHBOARD_URL        = os.getenv("DASHBOARD_URL", "https://datalinkedai.onrender.com/dashboard")
 
@@ -276,35 +282,60 @@ def log_act(icon: str, text: str, mod: str):
 #  IA
 # ══════════════════════════════════════════════════════
 
-async def ask(prompt: str, tokens: int = 1400) -> str:
+async def ask(prompt: str, tokens: int = 1400, _retry: int = 0) -> str:
+    """Appel IA avec retry automatique sur 429 (rate limit Groq) et fallback sur timeout."""
     if AI_PROVIDER == "none":
-        raise HTTPException(500, "Aucune cle IA configuree. Ajoute GROQ_API_KEY (gratuit sur console.groq.com).")
-    async with httpx.AsyncClient(timeout=90.0) as cl:
-        if AI_PROVIDER in ("groq", "openai"):
-            # Groq et OpenAI partagent le meme format d'API
-            base_url = "https://api.groq.com/openai/v1" if AI_PROVIDER == "groq" else "https://api.openai.com/v1"
-            api_key  = GROQ_API_KEY if AI_PROVIDER == "groq" else OPENAI_API_KEY
-            r = await cl.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": AI_MODEL, "max_tokens": tokens, "temperature": 0.7,
-                      "messages": [{"role": "user", "content": prompt}]},
-            )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
-        else:  # anthropic
-            r = await cl.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": AI_MODEL, "max_tokens": tokens,
-                      "messages": [{"role": "user", "content": prompt}]},
-            )
-            r.raise_for_status()
-            return "".join(b.get("text", "") for b in r.json().get("content", []))
+        raise HTTPException(503, "Aucune cle IA configuree. Ajoute GROQ_API_KEY (gratuit sur console.groq.com).")
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as cl:
+            if AI_PROVIDER in ("groq", "openai"):
+                base_url = "https://api.groq.com/openai/v1" if AI_PROVIDER == "groq" else "https://api.openai.com/v1"
+                api_key  = GROQ_API_KEY if AI_PROVIDER == "groq" else OPENAI_API_KEY
+                r = await cl.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": AI_MODEL, "max_tokens": tokens, "temperature": 0.7,
+                          "messages": [{"role": "user", "content": prompt}]},
+                )
+                # 429 = rate limit Groq → retry avec backoff
+                if r.status_code == 429 and _retry < 3:
+                    wait = int(r.headers.get("retry-after", 15 * (2 ** _retry)))
+                    logger.warning(f"Groq rate limit 429 — attente {wait}s (retry {_retry+1}/3)")
+                    await asyncio.sleep(min(wait, 45))
+                    return await ask(prompt, tokens, _retry + 1)
+                if r.status_code == 429:
+                    raise HTTPException(429, "Quota Groq épuisé. Attends quelques minutes ou configure OPENAI_API_KEY.")
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"]
+            else:  # anthropic
+                r = await cl.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": AI_MODEL, "max_tokens": tokens,
+                          "messages": [{"role": "user", "content": prompt}]},
+                )
+                if r.status_code == 429 and _retry < 3:
+                    await asyncio.sleep(15 * (2 ** _retry))
+                    return await ask(prompt, tokens, _retry + 1)
+                r.raise_for_status()
+                return "".join(b.get("text", "") for b in r.json().get("content", []))
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(504, "Timeout IA — le modele met trop de temps a repondre. Relance plus tard.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"Erreur IA {e.response.status_code}: {e.response.text[:200]}")
 
-async def ask_json(prompt: str, tokens: int = 1600) -> dict:
-    raw = await ask(prompt, tokens)
+async def ask_json(prompt: str, tokens: int = 1600, fallback: dict = None) -> dict:
+    """Appel IA attendant du JSON. Ne lève plus d'exception sur parse error — retourne fallback."""
+    try:
+        raw = await ask(prompt, tokens)
+    except HTTPException as e:
+        if e.status_code in (429, 503, 504):
+            logger.warning(f"ask_json: IA indisponible ({e.status_code}) — fallback")
+            return fallback or {}
+        raise
     cleaned = re.sub(r"```json\s*|```\s*", "", raw).strip()
     match = re.search(r"\{[\s\S]*\}", cleaned)
     if match:
@@ -313,7 +344,9 @@ async def ask_json(prompt: str, tokens: int = 1600) -> dict:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         logger.error(f"ask_json parse error: {e}\nRaw (300c): {raw[:300]}")
-        raise HTTPException(500, "L'IA n'a pas renvoyé du JSON valide. Réessaie.")
+        if fallback is not None:
+            return fallback
+        raise HTTPException(500, f"L'IA n'a pas renvoyé du JSON valide. Réessaie. (extrait: {raw[:100]})")
 
 # ══════════════════════════════════════════════════════
 #  EMAIL
@@ -371,6 +404,50 @@ async def send_email(to_email, to_name, subject, body_html, body_text, att_bytes
     if EMAIL_PROVIDER == "resend":
         return await send_via_resend(to_email, to_name, subject, body_html, body_text, att_bytes, att_name)
     return await send_via_gmail(to_email, to_name, subject, body_html, body_text, att_bytes, att_name)
+
+async def enrich_company_email(company: str, domain: str = "") -> str:
+    """Cherche l email recruteur via Hunter.io (100/mois gratuit).
+    Retourne l email trouvé ou chaîne vide si rien."""
+    if not HUNTER_API_KEY or not company:
+        return ""
+    try:
+        # Étape 1 : trouver le domaine si pas fourni
+        if not domain:
+            async with httpx.AsyncClient(timeout=8.0) as cl:
+                r = await cl.get(
+                    "https://api.hunter.io/v2/domain-search",
+                    params={"company": company, "api_key": HUNTER_API_KEY, "limit": 1}
+                )
+                if r.status_code == 200:
+                    data = r.json().get("data", {})
+                    domain = data.get("domain", "")
+                    # Prendre le premier email trouvé si disponible
+                    emails = data.get("emails", [])
+                    if emails:
+                        best = sorted(emails, key=lambda e: e.get("confidence", 0), reverse=True)[0]
+                        email = best.get("value", "")
+                        if email and best.get("confidence", 0) >= 50:
+                            logger.info(f"Hunter.io: {email} pour {company} (confiance {best.get('confidence')}%)")
+                            return email
+
+        # Étape 2 : email finder si on a le domaine mais pas l email
+        if domain:
+            async with httpx.AsyncClient(timeout=8.0) as cl:
+                r = await cl.get(
+                    "https://api.hunter.io/v2/email-finder",
+                    params={"domain": domain, "api_key": HUNTER_API_KEY}
+                )
+                if r.status_code == 200:
+                    data = r.json().get("data", {})
+                    email = data.get("email", "")
+                    score = data.get("score", 0)
+                    if email and score >= 50:
+                        logger.info(f"Hunter.io finder: {email} pour {domain} (score {score})")
+                        return email
+    except Exception as e:
+        logger.warning(f"Hunter.io error pour {company}: {e}")
+    return ""
+
 
 async def notify(title: str, message: str, url: str = "", priority: int = 0) -> bool:
     """Envoie une notification push via Pushover (gratuit, app mobile)."""
@@ -800,7 +877,9 @@ Offre: {raw['description']}
 JSON: {{"match_score":<0-100>,"title":"{raw['title']}","tjm_negotiate":"<TJM 500-900euro>",
 "urgency":"<Postuler maintenant/Peut attendre>","key_techs":["<t1>","<t2>","<t3>"],
 "match_reason":"<raison principale en 1 phrase>"}}
-JSON seul.""", 600)
+JSON seul.""", 600,
+                    fallback={"match_score": 0, "title": raw.get("title",""), "tjm_negotiate": "760euro/j",
+                              "urgency": "Peut attendre", "key_techs": [], "match_reason": "IA indisponible"})
             with db_conn() as conn:
                 cur = db_insert(
                     conn,
@@ -809,10 +888,15 @@ JSON seul.""", 600)
                      result.get("tjm_negotiate"), result.get("urgency", ""), "analyzed", raw.get("url", "")),
                 )
                 offer_id = cur.lastrowid
+            # Enrichissement email si pas fourni par le scraping
+            _raw_email = raw.get("company_email", "")
+            if not _raw_email and HUNTER_API_KEY:
+                _raw_email = await enrich_company_email(raw.get("company",""), raw.get("domain",""))
+
             entry = {**result, "offer_id": offer_id,
                      "url": raw.get("url"), "company": raw.get("company"),
                      "source": raw.get("source"), "description": raw.get("description",""),
-                     "company_email": raw.get("company_email", "")}
+                     "company_email": _raw_email}
             analyzed.append(entry)
             if result.get("match_score", 0) >= AUTO_APPLY_MIN_SCORE and AUTO_APPLY_ENABLED:
                 await run_auto_apply(offer_id, raw["title"], raw.get("company", ""), raw["description"], result, raw.get("company_email",""))
@@ -874,14 +958,19 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
                  json.dumps({"content": post, "topic": topic, "format": fmt}), "pending"))
             approvals_created.append({"type": "linkedin_post", "id": cur.lastrowid, "title": f"Post LinkedIn: {topic}"})
 
-    # 2. Candidatures pour offres score ≥ 60 → approvals (sans envoyer)
+    # 2. Candidatures pour offres score ≥ 60 → approvals (sans envoyer, PDF différé)
+    # CAP : max 3 candidatures par run pour éviter timeout Render (30s)
+    candidatures_this_run = 0
     for entry in analyzed:
+        if candidatures_this_run >= 3:
+            break
         if entry.get("match_score", 0) >= 60:
             try:
                 apply_result = await run_auto_apply(
                     entry["offer_id"], entry.get("title",""),
                     entry.get("company",""), entry.get("description",""),
-                    entry, entry.get("company_email","")
+                    entry, entry.get("company_email",""),
+                    defer_pdf=True   # PDF généré à l'approbation, pas maintenant
                 )
                 with db_conn() as conn:
                     cur = db_insert(conn,
@@ -894,10 +983,12 @@ UNIQUEMENT le texte du post, rien d'autre.""", 900)
                                      "email_body": apply_result["email_body"],
                                      "offer_title": entry.get("title",""),
                                      "company": entry.get("company",""),
+                                     "company_email": entry.get("company_email",""),
                                      "score": entry.get("match_score",0)}),
                          "pending"))
                     approvals_created.append({"type": "candidature", "id": cur.lastrowid,
                                               "title": f"Candidature: {entry.get('title','')} ({entry.get('match_score',0)}%)"})
+                candidatures_this_run += 1
             except Exception as e:
                 logger.error(f"Approval candidature error: {e}")
 
@@ -953,18 +1044,18 @@ Valider depuis le Dashboard
         except Exception as e:
             logger.error(f"Digest error: {e}")
 
+    top = top3[0] if top3 else {}  # FIX: défini AVANT notify() qui l'utilise
+
     # Notification push — résumé copilot
     if approvals_created:
         await notify(
-            f"DataLinkedAI — {len(approvals_created)} element(s) à valider",
+            f"DataLinkedAI — {len(approvals_created)} element(s) a valider",
             f"{len([a for a in approvals_created if a['type']=='candidature'])} candidature(s) + "
             f"{len([a for a in approvals_created if a['type']=='linkedin_post'])} post LinkedIn "
             f"en attente. Top score: {top.get('match_score', 0)}%",
             url=DASHBOARD_URL,
             priority=0
         )
-
-    top = top3[0] if top3 else {}
     with db_conn() as conn:
         db_exec(conn,
             "INSERT INTO copilot_runs(offers_found,top_offer,top_score,post_topic,digest_sent,auto_applied) VALUES(?,?,?,?,?,?)",
@@ -978,7 +1069,17 @@ Valider depuis le Dashboard
 #  AGENT ENGINE
 # ══════════════════════════════════════════════════════
 
-async def run_auto_apply(offer_id, title, company, description, analysis, company_email: str = ""):
+async def run_auto_apply(offer_id, title, company, description, analysis, company_email: str = "", defer_pdf: bool = False):
+    """Génère CV + email de candidature.
+    defer_pdf=True : saute la génération PDF (copilot rapide) — le PDF sera généré à l'approbation.
+    defer_pdf=False : génère le PDF immédiatement (candidature manuelle).
+    """
+    # Si pas d email fourni → tentative Hunter.io en dernier recours
+    if not company_email and company and HUNTER_API_KEY:
+        company_email = await enrich_company_email(company)
+        if company_email:
+            log_act("🔍", f"Hunter.io: {company_email} trouvé pour {company}", "agent")
+
     cv = await ask_json(f"""Tu es un expert RH spécialisé Data Engineering. Génère un CV JSON complet, moderne et percutant pour Sekouna KABA.
 
 PROFIL COMPLET:
@@ -1002,9 +1103,13 @@ JSON EXACT:
 {{"title_adapted":"<titre adapté>","accroche":"<3-4 phrases percutantes>","kpis":["<kpi1>","<kpi2>","<kpi3>"],"competences_core":["<c1>","<c2>","<c3>","<c4>","<c5>","<c6>"],"competences_secondaires":["<c1>","<c2>","<c3>","<c4>","<c5>"],"experiences":[{{"company":"<nom>","period":"<période>","role":"<titre exact>","context":"<contexte mission en 1 phrase>","missions":["<mission détaillée avec impact>","<mission détaillée>","<mission détaillée>","<mission>"],"stack":"<tech1, tech2, tech3>"}}],"formations":[{{"diplome":"<titre>","ecole":"<école>","annee":"<année>"}}],"certifications":["<cert1>","<cert2>"],"langues":[{{"langue":"<langue>","niveau":"<niveau>"}}],"soft_skills":["<skill1>","<skill2>","<skill3>","<skill4>"],"tjm_suggest":"<TJM>€/j"}}
 JSON seul, aucun texte autour.""", 1800)
 
-    # FIX-C : génération PDF async (await obligatoire — coroutine)
-    pdf_bytes = await generate_cv_pdf(cv, title)
-    pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
+    # FIX-C : génération PDF async — différée si mode copilot (évite timeout Render 30s)
+    if defer_pdf:
+        pdf_bytes = b""
+        pdf_b64   = ""   # sera généré à l'approbation dans approve_item()
+    else:
+        pdf_bytes = await generate_cv_pdf(cv, title)
+        pdf_b64   = base64.b64encode(pdf_bytes).decode() if pdf_bytes else ""
 
     email_body = await ask(f"""Tu es Sekouna KABA, Data Engineer Senior freelance.
 Email candidature pour: {title} chez {company or "l entreprise"}.
@@ -1030,6 +1135,175 @@ UNIQUEMENT le texte.""", 500)
     # pdf_bytes non retourné (bytes non sérialisables en JSON) — stocké en DB via pdf_b64
     return {"app_id": app_id, "status": status, "subject": subject, "followup_at": followup_at,
             "cv": cv, "cv_pdf_generated": bool(pdf_bytes), "email_body": email_body}
+
+
+# ══════════════════════════════════════════════════════
+#  BACKUP AUTOMATIQUE
+# ══════════════════════════════════════════════════════
+
+async def backup_database() -> dict:
+    """Backup automatique de la DB SQLite vers fichier horodaté.
+    En PostgreSQL, génère un dump SQL texte.
+    Stocke les 7 derniers backups, supprime les anciens."""
+    import shutil as _shutil
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = "/tmp/datalinkedai_backups"
+    os.makedirs(backup_dir, exist_ok=True)
+    try:
+        if not USE_POSTGRES:
+            src_path = DB_PATH
+            dst_path = f"{backup_dir}/backup_{ts}.db"
+            _shutil.copy2(src_path, dst_path)
+            size_kb = os.path.getsize(dst_path) // 1024
+            backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("backup_") and f.endswith(".db")])
+            for old_b in backups[:-7]:
+                os.remove(f"{backup_dir}/{old_b}")
+            logger.info(f"Backup SQLite: {dst_path} ({size_kb}Ko)")
+            log_act("💾", f"Backup DB: {ts} ({size_kb}Ko)", "system")
+            return {"status": "ok", "path": dst_path, "size_kb": size_kb,
+                    "type": "sqlite", "timestamp": ts, "backups_kept": min(len(backups), 7)}
+        else:
+            # PostgreSQL — export JSON des tables critiques (pg_dump non dispo sur Render free)
+            json_path = f"{backup_dir}/backup_{ts}.json"
+            with db_conn() as conn:
+                export = {}
+                for table in ["offers","auto_applications","emails","pending_approvals","negotiations","linkedin_posts"]:
+                    try:
+                        rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+                        desc = conn.execute(f"SELECT * FROM {table} LIMIT 0").description
+                        cols = [d[0] for d in desc] if desc else []
+                        export[table] = [dict(zip(cols, r)) for r in rows]
+                    except Exception:
+                        export[table] = []
+            with open(json_path, 'w') as f:
+                json.dump(export, f, default=str, indent=2)
+            size_kb = os.path.getsize(json_path) // 1024
+            backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("backup_")])
+            for old_b in backups[:-7]:
+                os.remove(f"{backup_dir}/{old_b}")
+            log_act("💾", f"Backup PostgreSQL JSON: {ts} ({size_kb}Ko)", "system")
+            return {"status": "ok", "path": json_path, "size_kb": size_kb,
+                    "type": "json_export", "timestamp": ts}
+    except Exception as e:
+        logger.error(f"Backup error: {e}")
+        return {"status": "error", "error": str(e)}
+
+async def list_backups() -> list:
+    """Liste les backups disponibles."""
+    backup_dir = "/tmp/datalinkedai_backups"
+    if not os.path.exists(backup_dir):
+        return []
+    files = []
+    for f in sorted(os.listdir(backup_dir), reverse=True):
+        if f.startswith("backup_"):
+            path = f"{backup_dir}/{f}"
+            ts_raw = f.replace("backup_","").split(".")[0]
+            files.append({
+                "filename": f, "size_kb": os.path.getsize(path) // 1024,
+                "timestamp": ts_raw,
+                "type": "sqlite" if f.endswith(".db") else ("postgresql" if f.endswith(".sql") else "json"),
+            })
+    return files[:7]
+
+
+async def parse_gmail_replies() -> dict:
+    """Scanne la boîte Gmail pour détecter les réponses aux candidatures.
+    Met à jour reply_received=1 et notifie via Pushover.
+    Nécessite GMAIL_USER + GMAIL_APP_PASS."""
+    if not GMAIL_USER or not GMAIL_APP_PASS or not GMAIL_PARSE_ENABLED:
+        return {"checked": 0, "replies_found": 0, "reason": "Gmail non configuré"}
+
+    import imaplib, email as _email_lib
+    from email.header import decode_header as _dh
+
+    replies_found = 0
+    checked = 0
+
+    try:
+        # Récupérer les sujets des candidatures envoyées pour matching
+        with db_conn() as conn:
+            pending = db_exec(conn,
+                "SELECT id, email_subject, offer_title FROM auto_applications WHERE status='sent' AND reply_received=0",
+            ).fetchall()
+
+        if not pending:
+            return {"checked": 0, "replies_found": 0, "reason": "Pas de candidatures en attente de réponse"}
+
+        # Connexion IMAP Gmail
+        def _imap_scan():
+            nonlocal replies_found, checked
+            mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+            mail.login(GMAIL_USER, GMAIL_APP_PASS)
+            mail.select("INBOX")
+
+            # Chercher les emails des 30 derniers jours
+            from datetime import timedelta
+            since = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
+            _, msg_ids = mail.search(None, f'(SINCE "{since}")')
+
+            ids = msg_ids[0].split()[-50:] if msg_ids[0] else []  # max 50 derniers
+            checked = len(ids)
+
+            # Indexer les sujets attendus pour matching rapide
+            subjects_map = {}  # sujet_normalisé → (app_id, offer_title)
+            for app_id, subject, offer_title in pending:
+                if subject:
+                    # Normaliser: minuscule, sans Re:/Fwd:
+                    import re as _re
+                    norm = _re.sub(r'^(re|fwd?|tr|aw):\s*', '', subject.lower().strip(), flags=_re.I)
+                    subjects_map[norm] = (app_id, offer_title)
+
+            matched_ids = []
+            for uid in ids:
+                try:
+                    _, msg_data = mail.fetch(uid, "(RFC822)")
+                    msg = _email_lib.message_from_bytes(msg_data[0][1])
+                    raw_subject = msg.get("Subject", "")
+                    # Décoder le sujet
+                    parts = _dh(raw_subject)
+                    subj = "".join(
+                        p.decode(enc or "utf-8") if isinstance(p, bytes) else p
+                        for p, enc in parts
+                    )
+                    import re as _re
+                    norm_subj = _re.sub(r'^(re|fwd?|tr|aw):\s*', '', subj.lower().strip(), flags=_re.I)
+
+                    # Vérifier si ça matche une candidature
+                    for expected_subj, (app_id, offer_title) in subjects_map.items():
+                        if expected_subj in norm_subj or norm_subj in expected_subj:
+                            matched_ids.append((app_id, offer_title, subj))
+                            break
+                except Exception:
+                    pass
+
+            mail.logout()
+            return matched_ids
+
+        loop = asyncio.get_event_loop()
+        matched = await loop.run_in_executor(None, _imap_scan)
+
+        for app_id, offer_title, reply_subject in matched:
+            with db_conn() as conn:
+                db_exec(conn,
+                    "UPDATE auto_applications SET reply_received=1, status='replied' WHERE id=?",
+                    (app_id,))
+            log_act("💬", f"Réponse reçue: {offer_title}", "agent")
+            await notify(
+                "💬 Réponse reçue !",
+                f"{offer_title} — Objet: {reply_subject[:60]}",
+                url=DASHBOARD_URL, priority=1  # priority=1 = son + vibration
+            )
+            replies_found += 1
+
+        return {"checked": checked, "replies_found": replies_found,
+                "updated": [r[1] for r in matched]}
+
+    except imaplib.IMAP4.error as e:
+        logger.error(f"Gmail IMAP error: {e}")
+        return {"checked": 0, "replies_found": 0, "error": str(e)}
+    except Exception as e:
+        logger.error(f"Gmail parse error: {e}")
+        return {"checked": 0, "replies_found": 0, "error": str(e)}
 
 async def run_followups():
     """Envoie les emails de relance pour les candidatures sans réponse."""
@@ -1079,6 +1353,7 @@ async def run_followups():
             logger.error(f"Followup {app_id}: {e}")
     return {"followups_checked": len(due), "followups_sent": sent_count}
 
+
 # ══════════════════════════════════════════════════════
 #  NEGOCIATEUR ENGINE
 # ══════════════════════════════════════════════════════
@@ -1115,6 +1390,10 @@ async def lifespan(app: FastAPI):
     init_db()
     scheduler.add_job(run_copilot,   CronTrigger(day_of_week="mon-fri", hour=COPILOT_HOUR, minute=0),
                       id="copilot",  replace_existing=True)
+    scheduler.add_job(backup_database, CronTrigger(hour=2, minute=0),
+                      id="daily_backup", misfire_grace_time=600)
+    scheduler.add_job(parse_gmail_replies, "interval", hours=2, id="gmail_parse",
+                      misfire_grace_time=300)
     scheduler.add_job(run_followups, CronTrigger(hour=10, minute=0),
                       id="followups", replace_existing=True)
     scheduler.start()
@@ -1571,9 +1850,29 @@ async def trigger_copilot(bt: BackgroundTasks, _=Depends(verify_api_key)):
 
 @app.post("/api/copilot/run/sync", tags=["Copilot Quotidien"])
 async def trigger_copilot_sync(request: Request, _=Depends(verify_api_key)):
+    """Lance le copilot en mode synchrone. Timeout 120s pour les offres mockées, 300s avec Apify."""
     _check_rate(request, "trigger_copilot_sync", 3, 3600)
-    _rate_limit(request, max_calls=3, window_seconds=3600)  # 3 fois/heure max
-    return await run_copilot()
+    timeout_sec = 300 if APIFY_TOKEN else 120
+    try:
+        result = await asyncio.wait_for(run_copilot(), timeout=timeout_sec)
+        return result
+    except asyncio.TimeoutError:
+        logger.error(f"Copilot sync timeout après {timeout_sec}s")
+        raise HTTPException(504, {
+            "error": "Copilot timeout",
+            "message": f"Le copilot a dépassé {timeout_sec}s. Les offres ont peut-être été partiellement analysées.",
+            "hint": "Lance /api/copilot/run (async en background) pour éviter le timeout.",
+            "dashboard": "/dashboard"
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Copilot sync crash: {e}", exc_info=True)
+        raise HTTPException(500, {
+            "error": str(type(e).__name__),
+            "message": str(e),
+            "hint": "Vérifie GROQ_API_KEY dans les variables d'env Render. Lance /health pour diagnostiquer.",
+        })
 
 @app.get("/api/copilot/history", tags=["Copilot Quotidien"])
 async def copilot_history(_=Depends(verify_api_key)):
@@ -1767,27 +2066,59 @@ async def approve_item(approval_id: int, _=Depends(verify_api_key)):
             company    = payload.get("company", "Recruteur")
             subject    = payload.get("subject", "Candidature freelance")
             email_body = payload.get("email_body", "")
+            company_email_payload = payload.get("company_email", "")
             with db_conn() as conn:
-                app_row = db_exec(conn, "SELECT cv_pdf_b64,company_email FROM auto_applications WHERE id=?", (app_id,)).fetchone()
-            if app_row and app_row[1] and EMAIL_PROVIDER != "none":
-                pdf_bytes = base64.b64decode(app_row[0]) if app_row[0] else b""
-                offer_title = payload.get("offer_title", "")
-                att_name = f"CV_Sekouna_KABA_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+                app_row = db_exec(conn, "SELECT cv_pdf_b64,company_email,offer_title FROM auto_applications WHERE id=?", (app_id,)).fetchone()
+
+            offer_title   = payload.get("offer_title", "") or (app_row[2] if app_row else "")
+            to_email      = (app_row[1] if app_row else "") or company_email_payload
+
+            # Générer le PDF si absent (cas defer_pdf=True du copilot)
+            pdf_b64_stored = app_row[0] if app_row else ""
+            if not pdf_b64_stored:
+                log_act("pdf", f"Génération PDF différée: {offer_title}", "validation")
                 try:
-                    await send_email(app_row[1], company, subject, make_html_email(email_body), email_body,
+                    # Régénérer le CV simplifié pour ce poste
+                    cv_data = {
+                        "title_adapted": offer_title,
+                        "accroche": f"Data Architect & Engineer Senior avec 8 ans d'expérience. Expert Snowflake, dbt, Airflow, PySpark. Missions SACEM, Thales, Accor.",
+                        "kpis": ["50M+ événements/jour", "12 pipelines migrés", "3 clouds maîtrisés"],
+                        "competences_core": ["Snowflake", "dbt Core", "Apache Airflow", "PySpark", "Python", "Kafka"],
+                        "competences_secondaires": ["AWS", "Azure", "GCP", "Terraform", "Docker", "GitLab CI/CD"],
+                        "experiences": PROFILE["experiences"],
+                        "formations": [{"diplome": "Master Informatique", "ecole": "Université", "annee": "2016"}],
+                        "certifications": ["AWS Certified", "GCP Professional Data Engineer", "Snowflake SnowPro"],
+                        "langues": [{"langue": "Français", "niveau": "Natif"}, {"langue": "Anglais", "niveau": "Courant"}],
+                        "soft_skills": ["Leadership technique", "Communication client", "Autonomie", "Esprit data-driven"],
+                        "tjm_suggest": "760€/j",
+                    }
+                    pdf_bytes_gen = await generate_cv_pdf(cv_data, offer_title)
+                    pdf_b64_stored = base64.b64encode(pdf_bytes_gen).decode() if pdf_bytes_gen else ""
+                    if pdf_b64_stored:
+                        with db_conn() as conn:
+                            db_exec(conn, "UPDATE auto_applications SET cv_pdf_b64=? WHERE id=?", (pdf_b64_stored, app_id))
+                except Exception as e:
+                    logger.warning(f"PDF deferred generation failed: {e}")
+
+            if to_email and EMAIL_PROVIDER != "none":
+                pdf_bytes = base64.b64decode(pdf_b64_stored) if pdf_b64_stored else b""
+                att_name  = f"CV_Sekouna_KABA_{offer_title[:25].replace(' ','_')}.pdf" if pdf_bytes else None
+                try:
+                    await send_email(to_email, company, subject, make_html_email(email_body), email_body,
                                      att_bytes=pdf_bytes or None, att_name=att_name)
                     with db_conn() as conn:
                         db_exec(conn, "UPDATE auto_applications SET status='sent', applied_at=CURRENT_TIMESTAMP WHERE id=?", (app_id,))
                     log_act("send", f"Candidature envoyee: {offer_title}", "validation")
-                    result = {"action": "email_sent", "to": app_row[1], "subject": subject}
-                    await notify("📨 Candidature envoyée", f"{offer_title}\nDest: {app_row[1]}\n{subject}", url=DASHBOARD_URL)
+                    result = {"action": "email_sent", "to": to_email, "subject": subject, "pdf_attached": bool(pdf_bytes)}
+                    await notify("📨 Candidature envoyée", f"{offer_title}\nDest: {to_email}\n{subject}", url=DASHBOARD_URL)
                 except Exception as e:
                     raise HTTPException(500, f"Erreur envoi email: {e}")
             else:
                 with db_conn() as conn:
                     db_exec(conn, "UPDATE auto_applications SET status='approved' WHERE id=?", (app_id,))
-                log_act("check", f"Candidature approuvee sans email: {payload.get('offer_title','')}", "validation")
-                result = {"action": "approved_no_email"}
+                log_act("check", f"Candidature approuvee (pas d'email): {offer_title}", "validation")
+                result = {"action": "approved_no_email",
+                          "hint": "Ajoute company_email via le dashboard ou configure HUNTER_API_KEY pour l'enrichissement auto."}
         with db_conn() as conn:
             db_exec(conn, "UPDATE pending_approvals SET status='approved', approved_at=CURRENT_TIMESTAMP WHERE id=?", (approval_id,))
         return {"status": "approved", "type": item_type, **result}
@@ -1974,6 +2305,44 @@ async def analytics(_=Depends(verify_api_key)):
             "pending": v_pending, "approved": v_approved,
             "rejected": v_rejected, "approval_rate_pct": v_rate,
         },
+    }
+
+
+# ══════════════════════════════════════════════════════
+#  BACKUP ENDPOINTS
+# ══════════════════════════════════════════════════════
+
+@app.post("/api/backup/run", tags=["Système"])
+async def trigger_backup(_=Depends(verify_api_key)):
+    """Déclenche un backup immédiat de la base de données."""
+    result = await backup_database()
+    return result
+
+@app.get("/api/backup/list", tags=["Système"])
+async def get_backups(_=Depends(verify_api_key)):
+    """Liste les backups disponibles (7 derniers)."""
+    backups = await list_backups()
+    return {"backups": backups, "count": len(backups), "storage": "/tmp/datalinkedai_backups"}
+
+# ══════════════════════════════════════════════════════
+#  GMAIL PARSING ENDPOINTS
+# ══════════════════════════════════════════════════════
+
+@app.post("/api/gmail/parse-replies", tags=["Gmail Parsing"])
+async def manual_gmail_parse(_=Depends(verify_api_key)):
+    """Déclenche manuellement le scan Gmail pour détecter les réponses."""
+    result = await parse_gmail_replies()
+    return result
+
+@app.get("/api/gmail/status", tags=["Gmail Parsing"])
+async def gmail_status(_=Depends(verify_api_key)):
+    """Vérifie si le parsing Gmail est configuré et actif."""
+    return {
+        "enabled": GMAIL_PARSE_ENABLED,
+        "gmail_configured": bool(GMAIL_USER and GMAIL_APP_PASS),
+        "gmail_user": GMAIL_USER if GMAIL_USER else None,
+        "scan_interval": "toutes les 2h (automatique)",
+        "hunter_configured": bool(HUNTER_API_KEY),
     }
 
 # ══════════════════════════════════════════════════════

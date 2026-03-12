@@ -270,11 +270,33 @@ textarea{min-height:90px}
       <div id="copilot-output" style="margin-top:1rem"></div>
     </div>
     <div class="card">
+      <h3>🔧 Actions manuelles</h3>
+      <div style="display:flex;flex-direction:column;gap:.75rem">
+        <div>
+          <p style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem">Scanner Gmail pour détecter les nouvelles réponses à tes candidatures.</p>
+          <button class="btn btn-secondary" id="btn-gmail-scan" onclick="scanGmail()">📨 Scanner Gmail maintenant</button>
+          <div id="gmail-scan-output" style="margin-top:.5rem;font-size:.82rem"></div>
+        </div>
+        <hr style="border:none;border-top:1px solid var(--blue-soft)">
+        <div>
+          <p style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem">Créer un backup de la base de données.</p>
+          <button class="btn btn-secondary" id="btn-backup" onclick="triggerBackup()">💾 Backup DB maintenant</button>
+          <div id="backup-output" style="margin-top:.5rem;font-size:.82rem"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="two-col" style="margin-top:1.5rem">
+    <div class="card">
       <h3>📊 Dernières exécutions</h3>
       <div id="copilot-history"><div class="empty"><div class="emoji">🕐</div><p>Aucune exécution</p></div></div>
     </div>
+    <div class="card">
+      <h3>💾 Derniers backups</h3>
+      <div id="backup-list"><div class="empty"><div class="emoji">💾</div><p>Aucun backup</p></div></div>
+    </div>
   </div>
-  <div class="card">
+  <div class="card" style="margin-top:1.5rem">
     <h3>⚙️ Configuration actuelle</h3>
     <div id="copilot-config" class="output"></div>
   </div>
@@ -729,7 +751,7 @@ function go(page) {
   document.querySelector(`[onclick="go('${page}')"]`).classList.add('active');
   document.getElementById('tb-title').textContent = titles[page] || page;
   if(page === 'home') loadDashboard();
-  if(page === 'copilot') { loadCopilotHistory(); loadCopilotConfig(); }
+  if(page === 'copilot') { loadCopilotHistory(); loadCopilotConfig(); loadBackupList(); }
   if(page === 'offers') loadOffers();
   if(page === 'agent' && document.getElementById('tab-agent-apps').classList.contains('active')) loadApps();
   if(page === 'nego') loadNegoHistory();
@@ -892,6 +914,68 @@ async function runCopilot() {
   }
   btn.disabled = false;
   btn.innerHTML = '🚀 Lancer maintenant';
+}
+
+async function scanGmail() {
+  const btn = document.getElementById('btn-gmail-scan');
+  const out = document.getElementById('gmail-scan-output');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Scan en cours...';
+  out.innerHTML = '';
+  try {
+    const r = await api('POST', '/api/gmail/parse-replies');
+    if (r.error) {
+      out.innerHTML = `<span style="color:var(--red)">❌ ${r.error}</span>`;
+    } else if (r.reason) {
+      out.innerHTML = `<span style="color:var(--dim)">${r.reason}</span>`;
+    } else {
+      const color = r.replies_found > 0 ? 'var(--green)' : 'var(--dim)';
+      out.innerHTML = `<span style="color:${color}">✅ ${r.checked} emails scannés — ${r.replies_found} réponse(s) détectée(s)</span>`;
+      if (r.replies_found > 0) toast('Nouvelles réponses détectées !', 'success');
+    }
+  } catch(e) {
+    out.innerHTML = `<span style="color:var(--red)">❌ ${e.message}</span>`;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '📨 Scanner Gmail maintenant';
+}
+
+async function triggerBackup() {
+  const btn = document.getElementById('btn-backup');
+  const out = document.getElementById('backup-output');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Backup en cours...';
+  try {
+    const r = await api('POST', '/api/backup/run');
+    if (r.status === 'ok') {
+      out.innerHTML = `<span style="color:var(--green)">✅ Backup créé — ${r.size_kb}Ko (${r.type}) · ${r.timestamp}</span>`;
+      toast('Backup réussi !', 'success');
+      loadBackupList();
+    } else {
+      out.innerHTML = `<span style="color:var(--red)">❌ Erreur: ${r.error}</span>`;
+    }
+  } catch(e) {
+    out.innerHTML = `<span style="color:var(--red)">❌ ${e.message}</span>`;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '💾 Backup DB maintenant';
+}
+
+async function loadBackupList() {
+  try {
+    const r = await api('GET', '/api/backup/list');
+    const el = document.getElementById('backup-list');
+    if (!r.backups || !r.backups.length) {
+      el.innerHTML = '<div class="empty"><div class="emoji">💾</div><p>Aucun backup</p></div>';
+      return;
+    }
+    el.innerHTML = '<table class="data-table"><thead><tr><th>Date</th><th>Type</th><th>Taille</th></tr></thead><tbody>' +
+      r.backups.map(b => `<tr>
+        <td style="font-family:var(--font-mono);font-size:.72rem">${b.timestamp}</td>
+        <td><span class="badge badge-blue">${b.type}</span></td>
+        <td>${b.size_kb}Ko</td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch(e) {}
 }
 
 async function loadCopilotHistory() {
