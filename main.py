@@ -1,5 +1,5 @@
 """
-DataLinkedAI v5.0 — Plateforme Freelance Data | 100% PRODUCTION READY
+DataLinkedAI v13.0.2 — Plateforme Freelance Data | 100% PRODUCTION READY
 Sekouna KABA | Data Engineer Senior | TJM 500-900€
 
 Corrections v3.0 :
@@ -87,7 +87,9 @@ else:
     AI_PROVIDER = "none";      AI_MODEL = ""
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH      = "/tmp/datalinkedai.db"
+DB_PATH = os.getenv("DB_PATH",
+    "/data/datalinkedai.db" if os.path.isdir("/data") else "/tmp/datalinkedai.db"
+)
 USE_POSTGRES = bool(DATABASE_URL)
 
 API_KEY        = os.getenv("API_KEY", "")
@@ -370,48 +372,39 @@ def db_insert(conn, sql: str, params=()):
 def init_db():
     """Crée les tables si elles n'existent pas encore."""
     tables = [
-        "CREATE TABLE IF NOT EXISTS offers(id SERIAL PRIMARY KEY,title TEXT,source TEXT,description TEXT,match_score INTEGER,tjm_negotiate TEXT,urgency TEXT,status TEXT DEFAULT 'new',url TEXT,match_reasons TEXT,gaps TEXT,negotiation_tip TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS cv_adaptations(id SERIAL PRIMARY KEY,offer_title TEXT,score INTEGER,title_adapted TEXT,accroche TEXT,cover_letter TEXT,tjm_suggest TEXT,cv_pdf_b64 TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS linkedin_posts(id SERIAL PRIMARY KEY,topic TEXT,format TEXT,tone TEXT,content TEXT,status TEXT DEFAULT 'draft',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS activities(id SERIAL PRIMARY KEY,icon TEXT,text TEXT,module TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS emails(id SERIAL PRIMARY KEY,to_name TEXT,to_email TEXT,company TEXT,role TEXT,subject TEXT,body_text TEXT,body_html TEXT,status TEXT DEFAULT 'draft',sent_at TIMESTAMP,replied_at TIMESTAMP,provider TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS email_contacts(id SERIAL PRIMARY KEY,name TEXT,email TEXT,company TEXT,role TEXT,source TEXT,notes TEXT,status TEXT DEFAULT 'new',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS copilot_runs(id SERIAL PRIMARY KEY,offers_found INTEGER DEFAULT 0,top_offer TEXT,top_score INTEGER,post_topic TEXT,digest_sent INTEGER DEFAULT 0,auto_applied INTEGER DEFAULT 0,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,reply_text TEXT,reply_analysis TEXT,reply_draft TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS negotiations(id SERIAL PRIMARY KEY,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',token TEXT,approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS offers(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT,source TEXT,description TEXT,match_score INTEGER,tjm_negotiate TEXT,urgency TEXT,status TEXT DEFAULT 'new',url TEXT,match_reasons TEXT,gaps TEXT,negotiation_tip TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS cv_adaptations(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_title TEXT,score INTEGER,title_adapted TEXT,accroche TEXT,cover_letter TEXT,tjm_suggest TEXT,cv_pdf_b64 TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS linkedin_posts(id INTEGER PRIMARY KEY AUTOINCREMENT,topic TEXT,format TEXT,tone TEXT,content TEXT,status TEXT DEFAULT 'draft',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY AUTOINCREMENT,icon TEXT,text TEXT,module TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS emails(id INTEGER PRIMARY KEY AUTOINCREMENT,to_name TEXT,to_email TEXT,company TEXT,role TEXT,subject TEXT,body_text TEXT,body_html TEXT,status TEXT DEFAULT 'draft',sent_at TIMESTAMP,replied_at TIMESTAMP,provider TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS email_contacts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,email TEXT,company TEXT,role TEXT,source TEXT,notes TEXT,status TEXT DEFAULT 'new',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS copilot_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,offers_found INTEGER DEFAULT 0,top_offer TEXT,top_score INTEGER,post_topic TEXT,digest_sent INTEGER DEFAULT 0,auto_applied INTEGER DEFAULT 0,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS auto_applications(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,reply_text TEXT,reply_analysis TEXT,reply_draft TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS negotiations(id INTEGER PRIMARY KEY AUTOINCREMENT,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS pending_approvals(id INTEGER PRIMARY KEY AUTOINCREMENT,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',token TEXT,approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── NOUVELLES TABLES v10 ──────────────────────────────────────────────
         # Profil utilisateur configurable (1 seule ligne, id=1)
         "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        # Migration v13.1: contact tables (safe — IF NOT EXISTS)
-        "CREATE TABLE IF NOT EXISTS offer_companies(id SERIAL PRIMARY KEY,offer_id INTEGER NOT NULL,company_name TEXT NOT NULL,domain TEXT,website TEXT,city TEXT,sector TEXT,size_estimate TEXT,company_type TEXT DEFAULT \'client_direct\',linkedin_url TEXT,notes TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS offer_contacts(id SERIAL PRIMARY KEY,offer_id INTEGER NOT NULL,company_id INTEGER,first_name TEXT,last_name TEXT,full_name TEXT,email TEXT,phone TEXT,role TEXT,contact_type TEXT DEFAULT \'recruiter\',linkedin_url TEXT,source TEXT DEFAULT \'ai_extracted\',confidence INTEGER DEFAULT 70,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        # Migration v13: add match_reasons columns if missing
-        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS match_reasons TEXT",
-        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS gaps TEXT",
-        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS negotiation_tip TEXT",
-        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_text TEXT",
-        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_analysis TEXT",
-        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_draft TEXT",
+
         # Sessions de mock interview
-        "CREATE TABLE IF NOT EXISTS interview_sessions(id SERIAL PRIMARY KEY,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS interview_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Cache scraping
-        "CREATE TABLE IF NOT EXISTS scrape_cache(id SERIAL PRIMARY KEY,source TEXT,query_hash TEXT UNIQUE,results TEXT,scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS scrape_cache(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,query_hash TEXT UNIQUE,results TEXT,scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── TABLES CONTACTS OFFRES v13 ────────────────────────────
         # Entreprises liées à une offre (client final vs intermédiaire séparés)
         "CREATE TABLE IF NOT EXISTS offer_companies(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER NOT NULL,company_name TEXT NOT NULL,domain TEXT,website TEXT,city TEXT,sector TEXT,size_estimate TEXT,company_type TEXT DEFAULT \'client_direct\',linkedin_url TEXT,notes TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS offer_contacts(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER NOT NULL,company_id INTEGER,first_name TEXT,last_name TEXT,full_name TEXT,email TEXT,phone TEXT,role TEXT,contact_type TEXT DEFAULT \'recruiter\',linkedin_url TEXT,source TEXT DEFAULT \'ai_extracted\',confidence INTEGER DEFAULT 70,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS offer_contacts(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER NOT NULL,company_id INTEGER,first_name TEXT,last_name TEXT,full_name TEXT,email TEXT,phone TEXT,role TEXT,contact_type TEXT DEFAULT 'recruiter',linkedin_url TEXT,source TEXT DEFAULT 'ai_extracted',confidence INTEGER DEFAULT 70,reputation_score INTEGER DEFAULT 50,last_reply_at TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── NOUVELLES TABLES v11 ──────────────────────────────────────────────
         # Calendrier éditorial LinkedIn — posts planifiés
-        "CREATE TABLE IF NOT EXISTS linkedin_schedule(id SERIAL PRIMARY KEY,post_id INTEGER,content TEXT NOT NULL,topic TEXT,format TEXT,scheduled_at TIMESTAMP NOT NULL,published_at TIMESTAMP,status TEXT DEFAULT 'scheduled',linkedin_post_id TEXT,error TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS linkedin_schedule(id INTEGER PRIMARY KEY AUTOINCREMENT,post_id INTEGER,content TEXT NOT NULL,topic TEXT,format TEXT,scheduled_at TIMESTAMP NOT NULL,published_at TIMESTAMP,status TEXT DEFAULT 'scheduled',linkedin_post_id TEXT,error TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Statistiques des scrapers par source (succès, nb offres, latence)
-        "CREATE TABLE IF NOT EXISTS scraper_stats(id SERIAL PRIMARY KEY,source TEXT,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,offers_found INTEGER DEFAULT 0,latency_ms INTEGER DEFAULT 0,success INTEGER DEFAULT 1,error TEXT)",
+        "CREATE TABLE IF NOT EXISTS scraper_stats(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,offers_found INTEGER DEFAULT 0,latency_ms INTEGER DEFAULT 0,success INTEGER DEFAULT 1,error TEXT)",
         # Token LinkedIn OAuth persisté en DB (survit aux redémarrages)
         "CREATE TABLE IF NOT EXISTS linkedin_tokens(id INTEGER PRIMARY KEY DEFAULT 1,access_token TEXT,person_id TEXT,expires_at TEXT,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
     ]
     if not USE_POSTGRES:
         tables = [
-            t.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+            t.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER PRIMARY KEY AUTOINCREMENT")
              .replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TEXT DEFAULT(datetime('now'))")
              .replace("TIMESTAMP,", "TEXT,")
              .replace("TIMESTAMP)", "TEXT)")
@@ -432,6 +425,16 @@ def init_db():
         "ALTER TABLE pending_approvals ADD COLUMN token TEXT",
         "ALTER TABLE pending_approvals ADD COLUMN notif_sent INTEGER DEFAULT 0",
         "ALTER TABLE pending_approvals ADD COLUMN rejected_at TIMESTAMP",
+        # v13 columns — try/except ignores "already exists" on SQLite
+        "ALTER TABLE offers ADD COLUMN match_reasons TEXT",
+        "ALTER TABLE offers ADD COLUMN gaps TEXT",
+        "ALTER TABLE offers ADD COLUMN negotiation_tip TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN reply_text TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN reply_analysis TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN reply_draft TEXT",
+        "ALTER TABLE pending_approvals ADD COLUMN notif_sent INTEGER DEFAULT 0",
+        "ALTER TABLE offer_contacts ADD COLUMN reputation_score INTEGER DEFAULT 50",
+        "ALTER TABLE offer_contacts ADD COLUMN last_reply_at TEXT",
     ]
     with db_conn() as conn:
         for mig in _migrations:
@@ -1984,6 +1987,12 @@ async def parse_gmail_replies() -> dict:
                 db_exec(conn,
                     "UPDATE auto_applications SET reply_received=1, status='replied', reply_text=? WHERE id=?",
                     (reply_body[:2000] if reply_body else "", app_id))
+                # Booster reputation_score du contact si email connu
+                if company_email:
+                    db_exec(conn,
+                        "UPDATE offer_contacts SET reputation_score=MIN(100,reputation_score+15),"
+                        "last_reply_at=? WHERE email=?",
+                        (datetime.now().isoformat(), company_email))
                 # Analyse IA asynchrone
                 try:
                     _ap = (f"Recruteur répond à candidature: {offer_title}.\nRéponse: {(reply_body or reply_subject)[:600]}\n"
@@ -2126,9 +2135,9 @@ async def send_weekly_report():
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("=" * 60)
-    logger.info("DataLinkedAI v11.0 — Démarrage")
+    logger.info("DataLinkedAI v13.0.2 — Démarrage")
     logger.info(f"  IA           : {AI_PROVIDER} / {AI_MODEL or 'non configuré'}")
-    logger.info(f"  DB           : {'PostgreSQL Supabase' if USE_POSTGRES else 'SQLite /tmp (non persistant)'}")
+    logger.info(f"  DB           : {'PostgreSQL Supabase' if USE_POSTGRES else f'SQLite {DB_PATH} ({"PERSISTANT" if "/data" in DB_PATH else "ephemere — montez Render Disk sur /data"})'}")
     logger.info(f"  Email        : {EMAIL_PROVIDER}")
     logger.info(f"  Scraping     : {'Apify (réel)' if APIFY_TOKEN else f'×10 gratuits ({len(SCRAPERS_ENABLED)} actifs)'}")
     logger.info(f"  LinkedIn auto: {'ACTIF (' + LINKEDIN_POST_DAYS + ' à ' + str(LINKEDIN_POST_HOUR) + 'h)' if LINKEDIN_AUTO_POST else 'Manuel (validation requise)'}")
@@ -2161,9 +2170,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="DataLinkedAI API v13.0.1",
+    title="DataLinkedAI API v13.0.2",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
-    version="13.0.1",
+    version="13.0.2",
     lifespan=lifespan,
     dependencies=[Depends(verify_api_key)],
 )
@@ -2184,7 +2193,7 @@ async def dashboard_ui():
 @app.get("/ping", include_in_schema=False)
 async def ping():
     """Endpoint public minimal — test de connexion sans auth."""
-    return {"ok": True, "auth_required": bool(API_KEY), "version": "13.0.1"}
+    return {"ok": True, "auth_required": bool(API_KEY), "version": "13.0.2"}
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -2206,7 +2215,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def health():
     token, pid = _get_linkedin_token()
     return {
-        "status": "ok", "version": "13.0.1",
+        "status": "ok", "version": "13.0.2",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
@@ -2434,6 +2443,10 @@ JSON seul.""", 1200)
              _j.dumps(r.get("gaps", []), ensure_ascii=False),
              r.get("negotiation_tip","")))
     log_act("📋", f"Analysee: {r.get('title','')} ({r.get('match_score')}%)", "offers")
+    try:
+        await ws_broadcast("new_offer", {"title": r.get("title",""), "score": r.get("match_score",0),
+                                          "urgency": r.get("urgency",""), "offer_id": oid})
+    except Exception: pass
     # Extraction contacts v13
     if oid:
         try:
@@ -3898,6 +3911,19 @@ async def get_offer_contacts(offer_id: int, _=Depends(verify_api_key)):
     }
 
 
+@app.patch("/api/contacts/{contact_id}/reputation", tags=["Contacts Offres"])
+async def patch_contact_reputation(contact_id: int, delta: int = 0, _=Depends(verify_api_key)):
+    """Ajuste manuellement le reputation_score d'un contact (+N ou -N)."""
+    with db_conn() as conn:
+        db_exec(conn,
+            "UPDATE offer_contacts SET reputation_score=MAX(0,MIN(100,reputation_score+?)) WHERE id=?",
+            (delta, contact_id))
+        row = db_exec(conn,
+            "SELECT reputation_score FROM offer_contacts WHERE id=?", (contact_id,)).fetchone()
+    if not row: raise HTTPException(404, "Contact introuvable")
+    return {"contact_id": contact_id, "reputation_score": row[0]}
+
+
 @app.get("/api/contacts/all", tags=["Contacts Offres"])
 async def list_all_contacts(
     company_type: str = "", contact_type: str = "",
@@ -3997,6 +4023,66 @@ async def export_contact_to_crm(contact_id: int, _=Depends(verify_api_key)):
             "VALUES(?,?,?,?,?,?)",
             (name or "", email or "", cname or "", role or "", "offer_contact", notes))
     return {"exported": True, "name": name, "email": email, "company": cname}
+
+
+# ════════════════════════════════════════════════════════════════
+# WEBSOCKET — Live dashboard updates  v13.0.2
+# ════════════════════════════════════════════════════════════════
+from fastapi import WebSocket, WebSocketDisconnect
+import asyncio
+
+_ws_clients: list = []
+
+async def ws_broadcast(event: str, data: dict):
+    """Envoie un événement JSON à tous les clients WebSocket connectés."""
+    if not _ws_clients:
+        return
+    msg = json.dumps({"event": event, "data": data, "ts": datetime.now().isoformat()},
+                     ensure_ascii=False, default=str)
+    dead = []
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        try: _ws_clients.remove(ws)
+        except ValueError: pass
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    """WebSocket live — push events copilot, offres, candidatures, contacts."""
+    # Auth via query param: ?key=xxx
+    key = ws.query_params.get("key", "")
+    if API_KEY and key != API_KEY:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    _ws_clients.append(ws)
+    logger.info(f"WS client connected — {len(_ws_clients)} total")
+    try:
+        # Send initial state immediately
+        await ws.send_text(json.dumps({
+            "event": "connected",
+            "data": {
+                "version": "13.0.2",
+                "copilot_running": _copilot_status.get("running", False),
+                "clients": len(_ws_clients)
+            }
+        }))
+        # Keep alive with periodic ping
+        while True:
+            await asyncio.sleep(25)
+            await ws.send_text(json.dumps({"event": "ping", "data": {}}))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        try: _ws_clients.remove(ws)
+        except ValueError: pass
+        logger.info(f"WS client disconnected — {len(_ws_clients)} remaining")
 
 
 @app.get("/api/market/trends", tags=["Analytics"])
@@ -4421,7 +4507,7 @@ async def root():
 
     return HTMLResponse(f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DataLinkedAI v3.0</title>
+<title>DataLinkedAI v13.0.2</title>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Instrument+Sans:wght@400;600&family=Fira+Code:wght@400&display=swap" rel="stylesheet">
 <style>*{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:'Instrument Sans',sans-serif;background:linear-gradient(135deg,#F0F4FF,#fff,#F4F0FF);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}}
@@ -4464,5 +4550,5 @@ footer{{text-align:center;font-family:'Fira Code';font-size:.6rem;color:#A0AFCF}
 <div class="card"><h3>📧 Prospection Email</h3><p>Email personnalisé par IA, envoi réel, suivi.</p><div class="ep">POST /api/email/compose</div></div>
 <div class="card"><h3>📑 Proposition Client</h3><p>Devis professionnel complet en 60 secondes.</p><div class="ep">POST /api/proposal/generate</div></div>
 </div>
-<footer>DataLinkedAI v3.0 · Sekouna KABA · kaba.sekouna@gmail.com · <a href="/docs" style="color:#1A56FF">API Docs</a></footer>
+<footer>DataLinkedAI v13.0.2 · Sekouna KABA · kaba.sekouna@gmail.com · <a href="/docs" style="color:#1A56FF">API Docs</a></footer>
 </div></body></html>""")

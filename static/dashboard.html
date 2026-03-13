@@ -276,7 +276,8 @@ nav{-webkit-overflow-scrolling:touch}
 <aside id="sidebar">
   <div class="sb-logo">
     <div class="sb-logo-mark">DL</div>
-    <div class="sb-logo-text">DataLinkedAI <span>v13.0 PROD</span></div>
+    <div class="sb-logo-text">DataLinkedAI <span>v13.0.2</span></div>
+    <span id="ws-dot" title="Live disconnected" style="width:7px;height:7px;border-radius:50%;background:#ef4444;display:inline-block;margin-left:4px;flex-shrink:0;transition:background .5s"></span>
   </div>
   <nav>
     <div class="nav-section">Vue générale</div>
@@ -3941,7 +3942,7 @@ async function checkLinkedInPending() {
 
 
 // ════════════════════════════════════════════════════════════════
-// CONTACTS & ENTREPRISES  v13.0.1
+// CONTACTS & ENTREPRISES  v13.0.2
 // ════════════════════════════════════════════════════════════════
 
 function showContactTab(tab) {
@@ -4021,7 +4022,7 @@ async function loadContactsPage() {
       if (c.city) html += '<div style="font-size:.68rem;color:var(--dim)">'+c.city+'</div>';
       html += '</td>';
       html += '<td style="padding:.45rem .6rem">' + compTypeBadge(c.company_type) + '</td>';
-      html += '<td style="padding:.45rem .6rem">' + confBar(c.confidence) + '</td>';
+      html += '<td style="padding:.45rem .6rem">' + confBar(c.confidence) + '<div style="margin-top:3px">' + repBar(c.reputation_score ?? 50) + '</div></td>';
       html += '<td style="padding:.45rem .6rem;font-size:.72rem;color:var(--dim);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (c.offer_title||'—') + '</td>';
       html += '<td style="padding:.45rem .6rem">';
       html += '<div style="display:flex;gap:.3rem">';
@@ -4311,7 +4312,97 @@ async function loadMarketTrends() {
 }
 
 // -- VERSION v13 -----------------------------------------------
-console.log('%c DataLinkedAI v13.0.1 ✅', 'color:#1A56FF;font-weight:bold;font-size:14px');
+// ════════════════════════════════════════════════════════════
+// WEBSOCKET — Live updates  v13.0.2
+// ════════════════════════════════════════════════════════════
+let _ws = null, _wsRetry = 0, _wsTimer = null;
+
+function wsConnect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const key   = window._apiKey || '';
+  const url   = `${proto}//${location.host}/ws${key ? '?key='+encodeURIComponent(key) : ''}`;
+  try {
+    _ws = new WebSocket(url);
+  } catch(e) { wsSetDot(false); return; }
+
+  _ws.onopen = () => {
+    _wsRetry = 0;
+    wsSetDot(true);
+    console.log('%c WS connected', 'color:#22c55e;font-weight:bold');
+  };
+
+  _ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      wsHandleEvent(msg.event, msg.data || {});
+    } catch(_) {}
+  };
+
+  _ws.onclose = () => {
+    wsSetDot(false);
+    _wsRetry++;
+    const delay = Math.min(30000, 2000 * _wsRetry);
+    clearTimeout(_wsTimer);
+    _wsTimer = setTimeout(wsConnect, delay);
+  };
+
+  _ws.onerror = () => { try { _ws.close(); } catch(_) {} };
+}
+
+function wsSetDot(connected) {
+  const dot = document.getElementById('ws-dot');
+  if (dot) {
+    dot.style.background = connected ? '#22c55e' : '#ef4444';
+    dot.title = connected ? 'Live connecté' : 'Live déconnecté';
+  }
+}
+
+function wsHandleEvent(event, data) {
+  if (event === 'ping') return;
+
+  if (event === 'new_offer') {
+    // Flash the offers nav item
+    const btn = document.querySelector('[onclick="go(\'offers\')"]');
+    if (btn) { btn.style.background = 'rgba(99,102,241,.2)'; setTimeout(() => btn.style.background = '', 2000); }
+    // Show toast
+    wsToast(`📋 Nouvelle offre : ${data.title || ''} — ${data.score || 0}%`, 'info');
+    // Auto-refresh dashboard stats
+    if (typeof loadDashboard === 'function') loadDashboard();
+  }
+
+  if (event === 'copilot_done') {
+    wsToast(`✅ Copilot terminé — ${data.offers || 0} offres, ${data.applied || 0} candidatures`, 'success');
+    if (typeof loadDashboard === 'function') loadDashboard();
+    if (typeof loadCopilotHistory === 'function') loadCopilotHistory();
+  }
+
+  if (event === 'connected') {
+    console.log('WS handshake OK — version', data.version, '— WS clients:', data.clients);
+  }
+}
+
+function wsToast(msg, type = 'info') {
+  let toastContainer = document.getElementById('ws-toast-container');
+  if (!toastContainer) {
+    toastContainer = document.createElement('div');
+    toastContainer.id = 'ws-toast-container';
+    toastContainer.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;';
+    document.body.appendChild(toastContainer);
+  }
+  const colors = { info: '#3b82f6', success: '#22c55e', warning: '#f59e0b', error: '#ef4444' };
+  const toast = document.createElement('div');
+  toast.style.cssText = `background:#1e293b;color:#f8fafc;padding:10px 16px;border-radius:8px;font-size:13px;max-width:320px;border-left:3px solid ${colors[type]||colors.info};box-shadow:0 4px 12px rgba(0,0,0,.3);animation:slideIn .2s ease;`;
+  toast.textContent = msg;
+  toastContainer.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .3s'; setTimeout(() => toast.remove(), 300); }, 4000);
+}
+
+// Auto-connect on load
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(wsConnect, 800);
+});
+
+console.log('%c DataLinkedAI v13.0.2 ✅', 'color:#1A56FF;font-weight:bold;font-size:14px');
 
 // -- LIEN MOBILE / QR CODE -----------------------------------------
 function showConnectQR() {
@@ -4411,7 +4502,7 @@ window.onload = () => {
 };
 </script>
 <!-- ════════════════════════════════════════════════
-     PAGE: CONTACTS & ENTREPRISES  v13.0.1
+     PAGE: CONTACTS & ENTREPRISES  v13.0.2
 ════════════════════════════════════════════════ -->
 <div id="page-contacts" class="page" style="display:none">
   <div class="page-header">
