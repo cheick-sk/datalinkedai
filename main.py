@@ -30,6 +30,7 @@ from datetime             import datetime, timedelta
 from contextlib           import asynccontextmanager, contextmanager
 from fastapi              import FastAPI, HTTPException, BackgroundTasks, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses    import HTMLResponse, FileResponse
 from fastapi.staticfiles  import StaticFiles
 from fastapi.security     import APIKeyHeader
@@ -174,8 +175,8 @@ def _check_rate(request: Request, endpoint: str, max_calls: int = 10, window: in
 # ── Profil Sekouna ─────────────────────────────────────────────────
 # ── Profil par défaut (écrasé dynamiquement depuis la DB après init_db) ──────
 DEFAULT_PROFILE = {
-    "name": "KABA Sekouna", "title": "Data Engineer Senior — Lead Tech",
-    "email": "kaba.sekouna@gmail.com", "phone": "+33 06 59 02 21 57",
+    "name": "", "title": "",
+    "email": "", "phone": "",
     "location": "Montreuil, Ile-de-France",
     "sector": "Data & Tech",
     "work_type": "freelance",          # freelance | salarie | both
@@ -369,19 +370,26 @@ def db_insert(conn, sql: str, params=()):
 def init_db():
     """Crée les tables si elles n'existent pas encore."""
     tables = [
-        "CREATE TABLE IF NOT EXISTS offers(id SERIAL PRIMARY KEY,title TEXT,source TEXT,description TEXT,match_score INTEGER,tjm_negotiate TEXT,urgency TEXT,status TEXT DEFAULT 'new',url TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS offers(id SERIAL PRIMARY KEY,title TEXT,source TEXT,description TEXT,match_score INTEGER,tjm_negotiate TEXT,urgency TEXT,status TEXT DEFAULT 'new',url TEXT,match_reasons TEXT,gaps TEXT,negotiation_tip TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS cv_adaptations(id SERIAL PRIMARY KEY,offer_title TEXT,score INTEGER,title_adapted TEXT,accroche TEXT,cover_letter TEXT,tjm_suggest TEXT,cv_pdf_b64 TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS linkedin_posts(id SERIAL PRIMARY KEY,topic TEXT,format TEXT,tone TEXT,content TEXT,status TEXT DEFAULT 'draft',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS activities(id SERIAL PRIMARY KEY,icon TEXT,text TEXT,module TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS emails(id SERIAL PRIMARY KEY,to_name TEXT,to_email TEXT,company TEXT,role TEXT,subject TEXT,body_text TEXT,body_html TEXT,status TEXT DEFAULT 'draft',sent_at TIMESTAMP,replied_at TIMESTAMP,provider TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS email_contacts(id SERIAL PRIMARY KEY,name TEXT,email TEXT,company TEXT,role TEXT,source TEXT,notes TEXT,status TEXT DEFAULT 'new',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS copilot_runs(id SERIAL PRIMARY KEY,offers_found INTEGER DEFAULT 0,top_offer TEXT,top_score INTEGER,post_topic TEXT,digest_sent INTEGER DEFAULT 0,auto_applied INTEGER DEFAULT 0,run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS auto_applications(id SERIAL PRIMARY KEY,offer_id INTEGER,offer_title TEXT,company_email TEXT,match_score INTEGER,tjm_negotiate TEXT,email_subject TEXT,email_body TEXT,cv_pdf_b64 TEXT,status TEXT DEFAULT 'pending',applied_at TIMESTAMP,followup_at TIMESTAMP,followup_sent INTEGER DEFAULT 0,reply_received INTEGER DEFAULT 0,reply_text TEXT,reply_analysis TEXT,reply_draft TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS negotiations(id SERIAL PRIMARY KEY,context TEXT,current_offer TEXT,target_tjm TEXT,script TEXT,counter_offer TEXT,arguments TEXT,outcome TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS pending_approvals(id SERIAL PRIMARY KEY,type TEXT,title TEXT,preview TEXT,payload TEXT,status TEXT DEFAULT 'pending',token TEXT,approved_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── NOUVELLES TABLES v10 ──────────────────────────────────────────────
         # Profil utilisateur configurable (1 seule ligne, id=1)
         "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # Migration v13: add match_reasons columns if missing
+        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS match_reasons TEXT",
+        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS gaps TEXT",
+        "ALTER TABLE offers ADD COLUMN IF NOT EXISTS negotiation_tip TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_text TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_analysis TEXT",
+        "ALTER TABLE auto_applications ADD COLUMN IF NOT EXISTS reply_draft TEXT",
         # Sessions de mock interview
         "CREATE TABLE IF NOT EXISTS interview_sessions(id SERIAL PRIMARY KEY,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Cache scraping
@@ -1558,11 +1566,15 @@ JSON seul.""", 600,
                     fallback={"match_score": 0, "title": raw.get("title",""), "tjm_negotiate": "760euro/j",
                               "urgency": "Peut attendre", "key_techs": [], "match_reason": "IA indisponible"})
             with db_conn() as conn:
+                _reasons = result.get("match_reasons") or ([result.get("match_reason","")] if result.get("match_reason") else [])
                 cur = db_insert(
                     conn,
-                    "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status,url) VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,status,url,match_reasons,gaps,negotiation_tip) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (raw["title"], raw["source"], raw["description"], result.get("match_score"),
-                     result.get("tjm_negotiate"), result.get("urgency", ""), "analyzed", raw.get("url", "")),
+                     result.get("tjm_negotiate"), result.get("urgency", ""), "analyzed", raw.get("url", ""),
+                     json.dumps(_reasons, ensure_ascii=False),
+                     json.dumps(result.get("gaps", []), ensure_ascii=False),
+                     result.get("negotiation_tip", "")),
                 )
                 offer_id = cur.lastrowid
             # Enrichissement email si pas fourni par le scraping
@@ -1944,8 +1956,19 @@ async def parse_gmail_replies() -> dict:
         for app_id, offer_title, reply_subject in matched:
             with db_conn() as conn:
                 db_exec(conn,
-                    "UPDATE auto_applications SET reply_received=1, status='replied' WHERE id=?",
-                    (app_id,))
+                    "UPDATE auto_applications SET reply_received=1, status='replied', reply_text=? WHERE id=?",
+                    (reply_body[:2000] if reply_body else "", app_id))
+                # Analyse IA asynchrone
+                try:
+                    _ap = (f"Recruteur répond à candidature: {offer_title}.\nRéponse: {(reply_body or reply_subject)[:600]}\n"
+                           'JSON: {"sentiment":"positif|neutre|negatif","next_step":"<action>","draft_reply":"<brouillon 60 mots>","summary":"<1 phrase>"}\nJSON seul.')
+                    _an = await ask_json(_ap, 400,
+                        fallback={"sentiment":"neutre","next_step":"Répondre","draft_reply":"","summary":offer_title})
+                    db_exec(conn,
+                        "UPDATE auto_applications SET reply_analysis=?, reply_draft=? WHERE id=?",
+                        (json.dumps(_an, ensure_ascii=False), _an.get("draft_reply",""), app_id))
+                except Exception as _ae:
+                    logger.warning(f"Reply AI analysis: {_ae}")
             log_act("💬", f"Réponse reçue: {offer_title}", "agent")
             await notify(
                 "💬 Réponse reçue !",
@@ -2032,6 +2055,47 @@ JSON seul.""", 1200)
 #  APP
 # ══════════════════════════════════════════════════════
 
+
+async def send_weekly_report():
+    """Rapport hebdomadaire automatique — envoyé le lundi matin."""
+    if EMAIL_PROVIDER == "none" or not COPILOT_EMAIL:
+        logger.info("Weekly report: email non configuré, skip")
+        return
+    try:
+        now = datetime.now()
+        week_ago = (now - timedelta(days=7)).isoformat()
+        with db_conn() as conn:
+            nb_offers  = db_exec(conn, "SELECT COUNT(*) FROM offers WHERE created_at>=?", (week_ago,)).fetchone()[0]
+            nb_apps    = db_exec(conn, "SELECT COUNT(*) FROM auto_applications WHERE applied_at>=?", (week_ago,)).fetchone()[0]
+            nb_replies = db_exec(conn, "SELECT COUNT(*) FROM auto_applications WHERE reply_received=1 AND applied_at>=?", (week_ago,)).fetchone()[0]
+            nb_posts   = db_exec(conn, "SELECT COUNT(*) FROM linkedin_posts WHERE created_at>=?", (week_ago,)).fetchone()[0]
+            nb_emails  = db_exec(conn, "SELECT COUNT(*) FROM emails WHERE status=\'sent\' AND sent_at>=?", (week_ago,)).fetchone()[0]
+            avg_row    = db_exec(conn, "SELECT AVG(match_score) FROM auto_applications WHERE applied_at>=?", (week_ago,)).fetchone()
+            avg_score  = round(avg_row[0] or 0)
+            top_row    = db_exec(conn,
+                "SELECT offer_title,match_score FROM auto_applications WHERE applied_at>=? ORDER BY match_score DESC LIMIT 1",
+                (week_ago,)).fetchone()
+        top_text = f"{top_row[0]} ({top_row[1]}%)" if top_row else "—"
+        rate     = f"{round(nb_replies/nb_apps*100)}%" if nb_apps else "—"
+        week_str = now.strftime("Semaine du %d %B %Y")
+        body = (
+            f"📊 Rapport hebdomadaire DataLinkedAI — {week_str}\n\n"
+            f"• Offres analysées   : {nb_offers}\n"
+            f"• Candidatures       : {nb_apps}\n"
+            f"• Réponses reçues    : {nb_replies} (taux {rate})\n"
+            f"• Score moyen        : {avg_score}%\n"
+            f"• Posts LinkedIn     : {nb_posts}\n"
+            f"• Emails prospection : {nb_emails}\n"
+            f"• Meilleure offre    : {top_text}\n\n"
+            "Bonne semaine !"
+        )
+        await send_email(COPILOT_EMAIL, "", f"📊 Rapport hebdo DataLinkedAI — {week_str}",
+                         make_html_email(body), body)
+        log_act("rapport", f"Rapport hebdo envoyé: {nb_apps} candidatures", "system")
+        logger.info(f"Weekly report sent to {COPILOT_EMAIL}")
+    except Exception as e:
+        logger.error(f"Weekly report error: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -2061,19 +2125,31 @@ async def lifespan(app: FastAPI):
     # LinkedIn auto-post : toutes les 15 min vérifier les posts planifiés
     scheduler.add_job(run_linkedin_scheduler, "interval", minutes=15,
                       id="linkedin_scheduler", misfire_grace_time=300)
+    scheduler.add_job(send_weekly_report, CronTrigger(day_of_week="mon", hour=8, minute=30),
+                      id="weekly_report", misfire_grace_time=3600)
     scheduler.start()
     yield
     # Shutdown
     scheduler.shutdown()
     logger.info("DataLinkedAI arrêté proprement.")
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all — retourne JSON propre au lieu d'une stacktrace HTML."""
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    logger.error(f"Unhandled exception {request.url}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"error": "Erreur interne", "detail": str(exc)[:200]})
+
 app = FastAPI(
-    title="DataLinkedAI API v8.0",
+    title="DataLinkedAI API v13.0",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
-    version="8.0.0",
+    version="13.0.0",
     lifespan=lifespan,
     dependencies=[Depends(verify_api_key)],
 )
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _static = pathlib.Path(__file__).parent / "static"
@@ -2090,7 +2166,7 @@ async def dashboard_ui():
 @app.get("/ping", include_in_schema=False)
 async def ping():
     """Endpoint public minimal — test de connexion sans auth."""
-    return {"ok": True, "auth_required": bool(API_KEY), "version": "12.0.0"}
+    return {"ok": True, "auth_required": bool(API_KEY), "version": "13.0.0"}
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -2104,7 +2180,7 @@ async def favicon():
 async def health():
     token, pid = _get_linkedin_token()
     return {
-        "status": "ok", "version": "12.0.0",
+        "status": "ok", "version": "13.0.0",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
@@ -2322,11 +2398,15 @@ JSON:{{"match_score":<0-100>,"title":"<titre>","tjm_range":"<fourchette>","tjm_n
 "urgency":"<Postuler maintenant/Peut attendre/Moins prioritaire>",
 "urgency_reason":"<pourquoi>","negotiation_tip":"<conseil TJM 2 phrases>"}}
 JSON seul.""", 1200)
+    import json as _j
     with db_conn() as conn:
         db_exec(conn,
-            "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO offers(title,source,description,match_score,tjm_negotiate,urgency,match_reasons,gaps,negotiation_tip) VALUES(?,?,?,?,?,?,?,?,?)",
             (r.get("title","Offre"), "manual", req.text[:1000],
-             r.get("match_score"), r.get("tjm_negotiate"), r.get("urgency","")))
+             r.get("match_score"), r.get("tjm_negotiate"), r.get("urgency",""),
+             _j.dumps(r.get("match_reasons", []), ensure_ascii=False),
+             _j.dumps(r.get("gaps", []), ensure_ascii=False),
+             r.get("negotiation_tip","")))
     log_act("📋", f"Analysee: {r.get('title','')} ({r.get('match_score')}%)", "offers")
     return r
 
@@ -2336,13 +2416,19 @@ async def list_offers(limit: int = 50, offset: int = 0, _=Depends(verify_api_key
         total = db_exec(conn, "SELECT COUNT(*) FROM offers").fetchone()[0]
         rows  = db_exec(
             conn,
-            f"SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at,description FROM offers ORDER BY created_at DESC LIMIT {min(limit,200)} OFFSET {offset}",
+            f"SELECT id,title,source,match_score,tjm_negotiate,urgency,status,url,created_at,description,match_reasons,gaps,negotiation_tip FROM offers ORDER BY created_at DESC LIMIT {min(limit,200)} OFFSET {offset}",
         ).fetchall()
+    def _parse_json_field(v):
+        if not v: return []
+        try: return _json.loads(v)
+        except: return [v] if isinstance(v, str) else []
     return {"total": total, "offset": offset, "limit": limit,
             "items": [{"id": r[0], "title": r[1], "source": r[2], "match_score": r[3],
              "tjm_negotiate": r[4], "urgency": r[5], "status": r[6],
-             "url": r[7], "created_at": str(r[8]),
-             "description": r[9] or ""} for r in rows]}
+             "url": r[7], "created_at": str(r[8]), "description": r[9] or "",
+             "match_reasons": _parse_json_field(r[10]),
+             "gaps": _parse_json_field(r[11]),
+             "negotiation_tip": r[12] or ""} for r in rows]}
 
 @app.post("/api/offers/scrape", tags=["Offres Freelance"])
 async def scrape_and_analyze_now(request: Request, _=Depends(verify_api_key)):
@@ -2888,6 +2974,81 @@ async def list_contacts(_=Depends(verify_api_key)):
 #  COPILOT ENDPOINTS
 # ══════════════════════════════════════════════════════
 
+@app.get("/api/replies", tags=["Agent Candidature Auto"])
+async def list_replies(_=Depends(verify_api_key)):
+    """Liste les réponses recruteurs avec analyse IA et brouillon de réponse."""
+    with db_conn() as conn:
+        rows = db_exec(conn,
+            "SELECT id,offer_title,company_email,reply_text,reply_analysis,reply_draft,applied_at FROM auto_applications "
+            "WHERE reply_received=1 ORDER BY applied_at DESC LIMIT 30").fetchall()
+    result = []
+    for r in rows:
+        analysis = {}
+        if r[4]:
+            try: analysis = json.loads(r[4])
+            except: pass
+        result.append({
+            "id": r[0], "title": r[1], "email": r[2],
+            "reply_text": r[3] or "",
+            "sentiment": analysis.get("sentiment", "neutre"),
+            "next_step": analysis.get("next_step", ""),
+            "draft_reply": r[5] or analysis.get("draft_reply", ""),
+            "summary": analysis.get("summary", ""),
+            "applied_at": str(r[6] or ""),
+        })
+    return result
+
+
+@app.get("/api/followups", tags=["Agent Candidature"])
+async def list_followups(_=Depends(verify_api_key)):
+    """Liste les candidatures en attente de relance + celles déjà relancées."""
+    now = datetime.now().isoformat()
+    with db_conn() as conn:
+        due = db_exec(conn,
+            "SELECT id,offer_title,company_email,applied_at,followup_at,tjm_negotiate,status FROM auto_applications "
+            "WHERE status='sent' AND followup_sent=0 AND reply_received=0 "
+            "AND followup_at IS NOT NULL ORDER BY followup_at ASC LIMIT 20", ()).fetchall()
+        sent = db_exec(conn,
+            "SELECT id,offer_title,company_email,applied_at,followup_at FROM auto_applications "
+            "WHERE followup_sent=1 ORDER BY followup_at DESC LIMIT 10", ()).fetchall()
+    return {
+        "due": [{"id":r[0],"title":r[1],"email":r[2],"applied_at":r[3],
+                 "followup_at":r[4],"tjm":r[5],"status":r[6]} for r in due],
+        "sent": [{"id":r[0],"title":r[1],"email":r[2],"applied_at":r[3],"followup_at":r[4]} for r in sent],
+        "due_count": len(due)
+    }
+
+@app.post("/api/followups/{app_id}/send", tags=["Agent Candidature"])
+async def send_followup_now(app_id: int, _=Depends(verify_api_key)):
+    """Force l'envoi immédiat d'une relance pour une candidature spécifique."""
+    with db_conn() as conn:
+        row = db_exec(conn,
+            "SELECT id,offer_title,company_email,email_body,tjm_negotiate FROM auto_applications WHERE id=?",
+            (app_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Candidature introuvable")
+    app_id2, title, company_email, orig_body, tjm = row
+    followup_text = await ask(
+        f"Tu es {PROFILE.get('name','Candidat')}, {PROFILE.get('title','Consultant freelance')} freelance. "
+        f"Écris un email de relance court (50-70 mots) pour la candidature: {title}. "
+        f"TJM proposé: {tjm or str(PROFILE.get('tjm_max',800))+'€/j'}. "
+        f"Ton naturel, direct, rappelle la candidature, propose un échange rapide. UNIQUEMENT le texte.", 400)
+    subject   = f"Re: Candidature freelance — {title}"
+    body_html = make_html_email(followup_text)
+    if company_email and EMAIL_PROVIDER != "none":
+        await send_email(company_email, "", subject, body_html, followup_text)
+    with db_conn() as conn:
+        db_exec(conn, "UPDATE auto_applications SET followup_sent=1 WHERE id=?", (app_id2,))
+    log_act("relance", f"Relance manuelle: {title}", "agent")
+    return {"ok": True, "text": followup_text, "sent_to": company_email}
+
+@app.post("/api/followups/send-all", tags=["Agent Candidature"])
+async def send_all_followups(_=Depends(verify_api_key)):
+    """Envoie toutes les relances dues maintenant."""
+    await run_followups()
+    return {"ok": True}
+
+@app.get("/api/copilot/run")
 @app.post("/api/copilot/run", tags=["Copilot Quotidien"])
 async def trigger_copilot(bt: BackgroundTasks, _=Depends(verify_api_key)):
     bt.add_task(run_copilot)
@@ -2945,7 +3106,25 @@ async def trigger_copilot_sync(request: Request, bt: BackgroundTasks, _=Depends(
 @app.get("/api/copilot/status", tags=["Copilot Quotidien"])
 async def copilot_status_ep(_=Depends(verify_api_key)):
     """Retourne l'état en temps réel du dernier run copilot (polling frontend)."""
-    return _copilot_status
+    # Calculer le % de progression basé sur les étapes connues
+    STEPS = [
+        "idle", "Démarrage", "Récupération des offres",
+        "Analyse offre", "Génération du post", "Notifications", "Terminé", "Erreur"
+    ]
+    step = _copilot_status.get("step", "idle")
+    pct = 0
+    if _copilot_status.get("running"):
+        if "Récupération" in step:    pct = 10
+        elif "Analyse offre" in step:
+            # Extraire n/total si présent
+            import re as _re; m = _re.search("([0-9]+)/([0-9]+)", step)
+            if m: pct = 20 + int(int(m.group(1)) / int(m.group(2)) * 60)
+            else: pct = 30
+        elif "LinkedIn" in step or "post" in step.lower(): pct = 85
+        elif "Notification" in step:  pct = 92
+    elif "Terminé" in step:   pct = 100
+    elif "Erreur" in step:    pct = 0
+    return {**_copilot_status, "progress_pct": pct}
 
 @app.get("/api/copilot/history", tags=["Copilot Quotidien"])
 async def copilot_history(_=Depends(verify_api_key)):
@@ -3045,7 +3224,7 @@ async def export_applications_csv(_=Depends(verify_api_key)):
     import csv, io as _io
     with db_conn() as conn:
         rows = db_exec(conn,
-            "SELECT id,offer_title,company_email,match_score,tjm_negotiate,status,applied_at,followup_at,followup_sent,reply_received,created_at FROM auto_applications ORDER BY created_at DESC"
+            "SELECT id,offer_title,company_email,match_score,tjm_negotiate,status,applied_at,followup_at,followup_sent,reply_received,reply_analysis,reply_draft,created_at FROM auto_applications ORDER BY created_at DESC"
         ).fetchall()
     out = _io.StringIO()
     w = csv.writer(out)
@@ -3062,13 +3241,13 @@ async def export_applications_csv(_=Depends(verify_api_key)):
 @app.get("/api/agent/applications", tags=["Agent Candidature Auto"])
 async def list_applications(status: Optional[str] = None, _=Depends(verify_api_key)):
     with db_conn() as conn:
-        q = "SELECT id,offer_title,company_email,match_score,tjm_negotiate,email_subject,status,applied_at,followup_at,followup_sent,reply_received,created_at FROM auto_applications"
+        q = "SELECT id,offer_title,company_email,match_score,tjm_negotiate,email_subject,status,applied_at,followup_at,followup_sent,reply_received,reply_analysis,reply_draft,created_at FROM auto_applications"
         if status:
             rows = db_exec(conn, q + " WHERE status=? ORDER BY created_at DESC LIMIT 30", (status,)).fetchall()
         else:
             rows = db_exec(conn, q + " ORDER BY created_at DESC LIMIT 30").fetchall()
     cols = ["id","offer_title","company_email","match_score","tjm_negotiate","email_subject",
-            "status","applied_at","followup_at","followup_sent","reply_received","created_at"]
+            "status","applied_at","followup_at","followup_sent","reply_received","reply_analysis","reply_draft","created_at"]
     return [dict(zip(cols, r)) for r in rows]
 
 @app.patch("/api/agent/applications/{app_id}/replied", tags=["Agent Candidature Auto"])
@@ -3079,6 +3258,20 @@ async def mark_replied_app(app_id: int, _=Depends(verify_api_key)):
             (app_id,))
     log_act("✅", f"Candidature #{app_id} repondue !", "agent")
     return {"app_id": app_id, "status": "replied"}
+
+@app.patch("/api/agent/applications/{app_id}/status", tags=["Agent Candidature Auto"])
+async def update_app_status(app_id: int, request: Request, _=Depends(verify_api_key)):
+    """Met à jour le statut d'une candidature (kanban)."""
+    body = await request.json()
+    new_status = body.get("status", "")
+    allowed = {"sent","replied","interview","offer","rejected","pending"}
+    if new_status not in allowed:
+        raise HTTPException(400, f"Statut invalide. Valeurs: {allowed}")
+    with db_conn() as conn:
+        db_exec(conn, "UPDATE auto_applications SET status=? WHERE id=?", (new_status, app_id))
+    log_act("kanban", f"Candidature {app_id} → {new_status}", "agent")
+    return {"ok": True, "id": app_id, "status": new_status}
+
 
 @app.get("/api/agent/stats", tags=["Agent Candidature Auto"])
 async def agent_stats(_=Depends(verify_api_key)):
@@ -3352,21 +3545,49 @@ async def public_reject(approval_id: int, token: str):
 
 @app.post("/api/notifications/test", tags=["Notifications"])
 async def test_notifications(_=Depends(verify_api_key)):
-    """Envoie une notification de test sur tous les canaux configurés."""
-    test_approval = [{
-        "type": "test", "id": 0, "token": "test-token",
-        "title": "🧪 Test notification DataLinkedAI",
-        "preview": "Si tu reçois ce message, les notifications fonctionnent correctement !",
-        "score": 99,
-    }]
-    results = await notify_all(test_approval, now_str=datetime.now().strftime("%A %d %B %Y"))
-    channels = {
-        "email":     bool(COPILOT_EMAIL and EMAIL_PROVIDER != "none"),
-        "whatsapp":  bool(TWILIO_SID and NOTIF_WHATSAPP),
-        "sms":       bool(TWILIO_SID and NOTIF_PHONE),
-        "pushover":  bool(PUSHOVER_TOKEN and PUSHOVER_USER),
+    """Envoie une notification de test sur tous les canaux — retourne le statut détaillé par canal."""
+    results = {}
+
+    # Test Email
+    if COPILOT_EMAIL and EMAIL_PROVIDER != "none":
+        try:
+            html = make_html_email("🧪 Test DataLinkedAI — Email reçu avec succès !")
+            await send_email(COPILOT_EMAIL, "", "🧪 Test DataLinkedAI", html, "Test OK")
+            results["email"] = {"ok": True, "to": COPILOT_EMAIL, "provider": EMAIL_PROVIDER}
+        except Exception as e:
+            results["email"] = {"ok": False, "error": str(e), "provider": EMAIL_PROVIDER}
+    else:
+        results["email"] = {"ok": False, "error": "GMAIL_USER ou RESEND_API_KEY non configuré", "provider": "none"}
+
+    # Test WhatsApp
+    if TWILIO_SID and TWILIO_TOKEN and NOTIF_WHATSAPP:
+        try:
+            await send_whatsapp(NOTIF_WHATSAPP, "🧪 Test DataLinkedAI — WhatsApp OK !")
+            results["whatsapp"] = {"ok": True, "to": NOTIF_WHATSAPP}
+        except Exception as e:
+            results["whatsapp"] = {"ok": False, "error": str(e)}
+    else:
+        results["whatsapp"] = {"ok": False, "error": "TWILIO_ACCOUNT_SID / NOTIF_WHATSAPP non configurés"}
+
+    # Test SMS
+    if TWILIO_SID and TWILIO_TOKEN and NOTIF_PHONE:
+        try:
+            await send_sms(NOTIF_PHONE, "Test DataLinkedAI — SMS OK !")
+            results["sms"] = {"ok": True, "to": NOTIF_PHONE}
+        except Exception as e:
+            results["sms"] = {"ok": False, "error": str(e)}
+    else:
+        results["sms"] = {"ok": False, "error": "TWILIO_ACCOUNT_SID / NOTIF_PHONE non configurés"}
+
+    # Résumé
+    ok_count = sum(1 for v in results.values() if v.get("ok"))
+    return {
+        "ok_count": ok_count,
+        "total":    len(results),
+        "channels": results,
+        "message":  f"{ok_count}/{len(results)} canaux fonctionnels"
     }
-    return {"channels_configured": channels, "channels_active": NOTIF_CHANNELS, "results": results}
+
 
 @app.get("/api/notifications/status", tags=["Notifications"])
 async def notification_status(_=Depends(verify_api_key)):
@@ -3409,6 +3630,45 @@ async def set_outcome(neg_id: int, outcome: str, _=Depends(verify_api_key)):
 # ══════════════════════════════════════════════════════
 #  ANALYTICS FREELANCE
 # ══════════════════════════════════════════════════════
+
+@app.get("/api/market/trends", tags=["Analytics"])
+async def market_trends(_=Depends(verify_api_key)):
+    """Tendances marché: stacks demandées, TJM médian, sources actives."""
+    with db_conn() as conn:
+        # Top stacks from key_techs in recent offers (last 30 days)
+        cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+        rows = db_exec(conn,
+            "SELECT title, description, tjm_negotiate, match_score, source FROM offers WHERE created_at>=? ORDER BY match_score DESC",
+            (cutoff,)).fetchall()
+        # Extract TJMs
+        import re as _re
+        tjms = []
+        for r in rows:
+            m = _re.search(r"(\d{3,4})", str(r[2] or ""))
+            if m: tjms.append(int(m.group(1)))
+        tjm_median = sorted(tjms)[len(tjms)//2] if tjms else 0
+        # Source distribution
+        sources = {}
+        for r in rows:
+            s = r[4] or "unknown"
+            sources[s] = sources.get(s, 0) + 1
+        # Score distribution
+        scores = [r[3] for r in rows if r[3]]
+        avg_score = round(sum(scores)/len(scores)) if scores else 0
+        top_offers = [{"title": r[0], "score": r[3], "tjm": r[2], "source": r[4]} for r in rows[:5]]
+    # Profile comparison
+    profile_tjm = PROFILE.get("tjm_target", 0)
+    return {
+        "period_days": 30,
+        "total_offers": len(rows),
+        "tjm_median_market": tjm_median,
+        "tjm_profile": profile_tjm,
+        "tjm_gap": tjm_median - profile_tjm if tjm_median and profile_tjm else 0,
+        "avg_match_score": avg_score,
+        "sources": sources,
+        "top_offers": top_offers,
+    }
+
 
 @app.get("/api/analytics", tags=["Analytics"])
 async def analytics(_=Depends(verify_api_key)):
