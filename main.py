@@ -91,6 +91,7 @@ USE_POSTGRES = bool(DATABASE_URL)
 
 API_KEY        = os.getenv("API_KEY", "")
 SKIP_AUTH      = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/dashboard", "/favicon.ico"}
+SKIP_AUTH_PREFIX = ("/docs", "/redoc", "/openapi", "/static", "/approve/", "/reject/", "/manifest")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 RESEND_API_KEY  = os.getenv("RESEND_API_KEY", "")
@@ -296,7 +297,7 @@ SECTOR_PRESETS = {
 
 async def verify_api_key(request: Request, key: str = Depends(api_key_header)):
     path = request.url.path
-    if path in SKIP_AUTH or path.startswith(("/docs", "/redoc", "/openapi", "/static")):
+    if path in SKIP_AUTH or path.startswith(SKIP_AUTH_PREFIX):
         return True
     if not API_KEY:
         # Pas de clé configurée → accès libre (dev mode) + avertissement
