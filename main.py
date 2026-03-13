@@ -90,7 +90,7 @@ DB_PATH      = "/tmp/datalinkedai.db"
 USE_POSTGRES = bool(DATABASE_URL)
 
 API_KEY        = os.getenv("API_KEY", "")
-SKIP_AUTH      = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/dashboard", "/favicon.ico"}
+SKIP_AUTH      = {"/", "/health", "/ping", "/docs", "/openapi.json", "/redoc", "/dashboard", "/favicon.ico"}
 SKIP_AUTH_PREFIX = ("/docs", "/redoc", "/openapi", "/static", "/approve/", "/reject/", "/manifest")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -2087,6 +2087,11 @@ async def dashboard_ui():
         return FileResponse(str(f), media_type="text/html")
     return HTMLResponse("<h2>dashboard.html introuvable dans /static/</h2>", status_code=404)
 
+@app.get("/ping", include_in_schema=False)
+async def ping():
+    """Endpoint public minimal — test de connexion sans auth."""
+    return {"ok": True, "auth_required": bool(API_KEY), "version": "12.0.0"}
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     f = _static / "favicon.ico"
@@ -2099,7 +2104,7 @@ async def favicon():
 async def health():
     token, pid = _get_linkedin_token()
     return {
-        "status": "ok", "version": "11.0.0",
+        "status": "ok", "version": "12.0.0",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,

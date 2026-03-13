@@ -828,6 +828,7 @@ nav{-webkit-overflow-scrolling:touch}
         <input type="text" id="cfg-key" placeholder="mon-secret-2025">
       </div>
       <button class="btn btn-primary" onclick="saveConfig()">💾 Sauvegarder & Tester</button>
+      <button class="btn btn-secondary" onclick="showConnectQR()" title="Générer un lien QR pour iPhone/Android">📱 Lien mobile</button>
     </div>
     <div class="card">
       <h3>📋 Health Check</h3>
@@ -1169,14 +1170,48 @@ HUNTER_API_KEY=...               # hunter.io — enrichissement email recruteur<
 <script>
 // -- CONFIG --------------------------------------------------------
 // Stockage sécurisé - fonctionne avec ou sans localStorage
+// Triple-fallback storage: localStorage → sessionStorage → memory → cookie
 const store = {
-  get(k) { try { return localStorage.getItem(k) || ''; } catch(e) { return store._mem[k] || ''; } },
-  set(k,v){ try { localStorage.setItem(k, v); } catch(e) {} store._mem[k] = v; },
-  _mem: {}
+  _mem: {},
+  get(k) {
+    try { const v = localStorage.getItem(k); if (v !== null) return v; } catch(e) {}
+    try { const v = sessionStorage.getItem(k); if (v !== null) return v; } catch(e) {}
+    if (store._mem[k] !== undefined) return store._mem[k];
+    // Cookie fallback (iOS Safari private mode)
+    try {
+      const m = document.cookie.match('(?:^|;)\\s*dl_' + k + '=([^;]*)');
+      if (m) return decodeURIComponent(m[1]);
+    } catch(e) {}
+    return '';
+  },
+  set(k, v) {
+    try { localStorage.setItem(k, v); } catch(e) {}
+    try { sessionStorage.setItem(k, v); } catch(e) {}
+    store._mem[k] = v;
+    // Cookie fallback: 365 jours, SameSite=Strict
+    try {
+      const exp = new Date(Date.now() + 365*24*3600*1000).toUTCString();
+      document.cookie = 'dl_' + k + '=' + encodeURIComponent(v) + ';expires=' + exp + ';path=/;SameSite=Strict';
+    } catch(e) {}
+  },
+  clear(k) {
+    try { localStorage.removeItem(k); } catch(e) {}
+    try { sessionStorage.removeItem(k); } catch(e) {}
+    delete store._mem[k];
+    try { document.cookie = 'dl_' + k + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/'; } catch(e) {}
+  }
 };
 
-let API_BASE = store.get('api_base');
-let API_KEY  = store.get('api_key');
+// Lire config (URL params prioritaires sur storage — permet QR code de connexion)
+const _qp = new URLSearchParams(window.location.search);
+let API_BASE = (_qp.get('api') ? decodeURIComponent(_qp.get('api')) : store.get('api_base')).replace(/\/+$/, '');
+let API_KEY  = _qp.get('key')  ? decodeURIComponent(_qp.get('key'))  : store.get('api_key');
+// Si URL params présents → les sauvegarder et nettoyer l'URL
+if (_qp.get('api')) {
+  store.set('api_base', API_BASE);
+  store.set('api_key',  API_KEY);
+  window.history.replaceState({}, '', window.location.pathname);
+}
 
 // -- CLIPBOARD REGISTRY --------------------------------------------
 // Stocke les textes longs ici pour éviter les problèmes d'échappement dans onclick
@@ -1185,14 +1220,24 @@ let _clipIdx = 0;
 function clipStore(text) { const id = 'c' + (++_clipIdx); _clip[id] = text; return id; }
 function clipCopy(id) { const t = _clip[id] || ''; navigator.clipboard.writeText(t).then(() => toast('Copié !', 'success')).catch(() => { try { const el = Object.assign(document.createElement('textarea'), {value:t}); document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); toast('Copié !', 'success'); } catch(e) { toast('Erreur copie', 'error'); } }); }
 
-// Init inputs
-document.getElementById('api-url-input').value = API_BASE;
-document.getElementById('api-key-input').value  = API_KEY;
-document.getElementById('cfg-url').value = API_BASE;
-document.getElementById('cfg-key').value = API_KEY;
+// Init inputs depuis les variables déjà chargées (triple-fallback storage)
+function _syncInputs() {
+  const ids = [['api-url-input','api_base',()=>API_BASE],['api-key-input','api_key',()=>API_KEY],
+               ['cfg-url','api_base',()=>API_BASE],['cfg-key','api_key',()=>API_KEY]];
+  ids.forEach(([id])=>{ const el=document.getElementById(id); if(el&&!el._bound){ el.value = id.includes('url')||id==='cfg-url' ? API_BASE : API_KEY; } });
+}
+_syncInputs();
 
-document.getElementById('api-url-input').oninput = e => { API_BASE = e.target.value; store.set('api_base', API_BASE); document.getElementById('cfg-url').value = API_BASE; };
-document.getElementById('api-key-input').oninput  = e => { API_KEY = e.target.value;  store.set('api_key',  API_KEY);  document.getElementById('cfg-key').value  = API_KEY; };
+document.getElementById('api-url-input').oninput = e => {
+  API_BASE = e.target.value.trim().replace(/\/+$/,'');
+  store.set('api_base', API_BASE);
+  const cu=document.getElementById('cfg-url'); if(cu) cu.value=API_BASE;
+};
+document.getElementById('api-key-input').oninput = e => {
+  API_KEY = e.target.value.trim();
+  store.set('api_key', API_KEY);
+  const ck=document.getElementById('cfg-key'); if(ck) ck.value=API_KEY;
+};
 
 // -- API -----------------------------------------------------------
 async function api(method, path, body) {
@@ -3376,9 +3421,17 @@ async function doSetupConnect() {
   btn.disabled = true;
   err.style.display = 'none';
   try {
-    const r = await fetch(b + '/health', { headers: k ? {'X-API-Key': k} : {} });
+    const r = await fetch(b + '/ping', { headers: k ? {'X-API-Key': k} : {}, signal: AbortSignal.timeout(8000) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
+    // Vérifie si la clé est requise mais manquante
+    if (data.auth_required && !k) {
+      err.textContent = '🔑 Ce backend nécessite une clé API. Saisis ta API_KEY ci-dessus.';
+      err.style.display = 'block';
+      btn.innerHTML = '🚀 Se connecter'; btn.disabled = false;
+      document.getElementById('setup-key').focus();
+      return;
+    }
     // Succès
     API_BASE = b; API_KEY = k;
     store.set('api_base', b); store.set('api_key', k);
@@ -3404,6 +3457,30 @@ async function doSetupConnect() {
     err.textContent = '❌ Impossible de joindre le backend : ' + e.message + '. Vérifie l\'URL et que l\'app est démarrée.';
     err.style.display = 'block';
   }
+}
+
+
+// -- LIEN MOBILE / QR CODE -----------------------------------------
+function showConnectQR() {
+  if (!API_BASE) { toast('Configure l\'URL backend d\'abord !', 'error'); return; }
+  const url = API_BASE + '/dashboard?api=' + encodeURIComponent(API_BASE) +
+              (API_KEY ? '&key=' + encodeURIComponent(API_KEY) : '');
+  // Modal
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:1.5rem;max-width:400px;width:100%;text-align:center">
+      <h3 style="font-family:var(--font-head);margin-bottom:.75rem">📱 Connexion mobile</h3>
+      <p style="color:var(--dim);font-size:.82rem;margin-bottom:1rem">Copie ce lien et ouvre-le sur ton iPhone/Android. Il contient ton URL et ta clé.</p>
+      <div style="background:var(--bg);border:1.5px solid var(--border);border-radius:8px;padding:.75rem;font-family:var(--font-mono);font-size:.68rem;word-break:break-all;color:var(--ink2);margin-bottom:1rem;text-align:left">${url}</div>
+      <div style="display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="navigator.clipboard.writeText('${url}').then(()=>toast('Lien copié !','success')).catch(()=>toast('Copie manuelle',''))">📋 Copier le lien</button>
+        <button class="btn btn-secondary" onclick="this.closest('[style*=fixed]').remove()">Fermer</button>
+      </div>
+      <p style="color:var(--dim);font-size:.7rem;margin-top:.75rem">⚠️ Ce lien contient ta clé API — ne le partage pas publiquement</p>
+    </div>`;
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+  document.body.appendChild(modal);
 }
 
 // -- INIT ----------------------------------------------------------
@@ -3435,16 +3512,6 @@ window.onload = () => {
     // Swipe depuis le bord gauche → ouvre la sidebar
     if (dx > 60 && _touchStartX < 30 && !sidebar.classList.contains('open') && window.innerWidth < 768) openSidebar();
   }, {passive:true});
-
-  // Config depuis l'URL (permet de passer api_base et api_key en paramètre)
-  const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.get('api')) {
-    const b = decodeURIComponent(urlParams.get('api'));
-    const k = urlParams.get('key') ? decodeURIComponent(urlParams.get('key')) : API_KEY;
-    if (b) { API_BASE = b; API_KEY = k || API_KEY; store.set('api_base', b); store.set('api_key', API_KEY);
-      const u = document.getElementById('api-url-input'); if(u) u.value = b;
-      const ki = document.getElementById('api-key-input'); if(ki) ki.value = API_KEY; }
-  }
 
   if (API_BASE) {
     loadDashboard();
