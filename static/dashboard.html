@@ -268,9 +268,93 @@ nav{-webkit-overflow-scrolling:touch}
   --font-body:'Instrument Sans','Segoe UI','Helvetica Neue',Arial,sans-serif;
   --font-mono:'Fira Code','Courier New',Courier,monospace;
 }
+
+/* ── MOBILE LOGIN MODAL ─────────────────────────────────────────── */
+#mobile-login-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 99999;
+  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+  align-items: center; justify-content: center; padding: 1.5rem;
+}
+#mobile-login-overlay.visible { display: flex; }
+#mobile-login-card {
+  background: #fff; border-radius: 20px; padding: 2rem 1.5rem;
+  width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.4);
+}
+#mobile-login-card .ml-logo {
+  text-align: center; margin-bottom: 1.5rem;
+}
+#mobile-login-card .ml-logo-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 56px; height: 56px; border-radius: 14px;
+  background: linear-gradient(135deg, #1A56FF, #0ea5e9);
+  color: #fff; font-weight: 800; font-size: 1.3rem; margin-bottom: .5rem;
+}
+#mobile-login-card h2 { font-size: 1.2rem; font-weight: 700; color: #0f172a; text-align:center; margin:0 0 .25rem; }
+#mobile-login-card .ml-sub { font-size: .8rem; color: #64748b; text-align:center; margin-bottom:1.5rem; }
+#mobile-login-card label { display:block; font-size:.75rem; font-weight:600; color:#374151; margin-bottom:.35rem; }
+#mobile-login-card input {
+  width:100%; box-sizing:border-box; padding:.75rem 1rem;
+  border: 1.5px solid #e2e8f0; border-radius: 10px;
+  font-size:.9rem; color:#0f172a; background:#f8fafc; outline:none;
+  margin-bottom:1rem; font-family:var(--font-mono,monospace);
+  -webkit-appearance: none; appearance: none;
+}
+#mobile-login-card input:focus { border-color: #1A56FF; background: #fff; }
+#mobile-login-card input::placeholder { color: #94a3b8; font-size:.8rem; }
+#ml-connect-btn {
+  width:100%; padding:.85rem; border:none; border-radius:10px;
+  background: linear-gradient(135deg, #1A56FF, #0ea5e9);
+  color:#fff; font-size:1rem; font-weight:700; cursor:pointer;
+  margin-top:.25rem; -webkit-tap-highlight-color: transparent;
+  transition: opacity .15s;
+}
+#ml-connect-btn:active { opacity: .85; }
+#ml-connect-btn:disabled { opacity: .6; cursor: not-allowed; }
+#ml-status { margin-top:.85rem; font-size:.8rem; text-align:center; min-height:1.2rem; color:#64748b; }
+#ml-status.error { color: #ef4444; font-weight:600; }
+#ml-status.success { color: #22c55e; font-weight:600; }
+#ml-paste-hint { font-size:.72rem; color:#94a3b8; text-align:center; margin-top:.75rem; line-height:1.4; }
+
+@media (max-width: 767px) {
+  #mobile-connect-btn { display: inline-flex !important; }
+}
+
+/* ── END MOBILE LOGIN MODAL ──────────────────────────────────────── */
+
 </style>
 </head>
 <body>
+
+<!-- ── MOBILE LOGIN OVERLAY ──────────────────────────────── -->
+<div id="mobile-login-overlay">
+  <div id="mobile-login-card">
+    <div class="ml-logo">
+      <div class="ml-logo-mark">DL</div>
+      <h2>DataLinkedAI</h2>
+      <p class="ml-sub">Connecte ton backend pour commencer</p>
+    </div>
+
+    <label for="ml-url-input">URL du backend (Render / Railway)</label>
+    <input id="ml-url-input" type="url" inputmode="url" autocorrect="off"
+           autocapitalize="none" spellcheck="false"
+           placeholder="https://datalinkedai.onrender.com">
+
+    <label for="ml-key-input">Clé API (API_KEY)</label>
+    <input id="ml-key-input" type="text" inputmode="text" autocorrect="off"
+           autocapitalize="none" spellcheck="false"
+           placeholder="mon-secret-2025">
+
+    <button id="ml-connect-btn" onclick="mobileConnect()">Se connecter →</button>
+    <div id="ml-status"></div>
+    <p class="ml-paste-hint">
+      💡 Copie ton URL Render et ta clé depuis la page Configuration sur PC,
+      puis colle-les ici.
+    </p>
+  </div>
+</div>
+<!-- ── END MOBILE LOGIN OVERLAY ──────────────────────────── -->
+
 
 <!-- SIDEBAR -->
 <aside id="sidebar">
@@ -323,12 +407,19 @@ nav{-webkit-overflow-scrolling:touch}
   <input id="api-url-input" type="text" placeholder="https://votre-app.railway.app" title="URL de votre API backend">
   <input id="api-key-input" type="text" placeholder="X-API-Key" title="Clé API sécurité">
   <button class="btn btn-secondary btn-sm" onclick="checkHealth()">Tester ✓</button>
+  <button id="mobile-connect-btn" class="btn btn-primary btn-sm" onclick="showMobileLogin()" style="display:none">🔌 Connecter</button>
   <div class="status-dot" id="status-dot"></div>
   <span id="status-label" style="font-size:.72rem;font-family:var(--font-mono);color:var(--dim)">Non connecté</span>
   <button class="btn btn-secondary btn-sm" onclick="go('config')" id="cfg-mobile-btn"
     style="display:none;margin-left:auto;flex-shrink:0">⚙️</button>
 </div>
 
+<div id="no-config-banner" style="display:none;background:#fef3c7;border-bottom:1px solid #fcd34d;padding:.55rem 1.5rem;font-size:.82rem;color:#92400e;align-items:center;gap:.75rem;flex-wrap:wrap">
+  ⚠️ <strong>Pas encore configuré</strong> — Saisis ton URL backend et ta clé API dans
+  <button onclick="go('config')" style="background:none;border:none;color:#1A56FF;font-size:.82rem;cursor:pointer;text-decoration:underline;padding:0">⚙️ Configuration</button>
+  &nbsp;|&nbsp;
+  <button onclick="showMobileLogin()" style="background:none;border:none;color:#1A56FF;font-size:.82rem;cursor:pointer;text-decoration:underline;padding:0">📱 Se connecter (mobile)</button>
+</div>
 <!-- ══════════════════════════════════
      PAGE: HOME
 ════════════════════════════════════ -->
@@ -4312,6 +4403,155 @@ async function loadMarketTrends() {
 }
 
 // -- VERSION v13 -----------------------------------------------
+
+// ════════════════════════════════════════════════════════════
+// MOBILE LOGIN  v13.0.2
+// ════════════════════════════════════════════════════════════
+function showMobileLogin() {
+  const overlay = document.getElementById('mobile-login-overlay');
+  if (!overlay) return;
+  // Pre-fill if we already have partial config
+  const urlIn = document.getElementById('ml-url-input');
+  const keyIn = document.getElementById('ml-key-input');
+  if (API_BASE && urlIn) urlIn.value = API_BASE;
+  if (API_KEY  && keyIn) keyIn.value = API_KEY;
+  overlay.classList.add('visible');
+}
+
+function hideMobileLogin() {
+  const overlay = document.getElementById('mobile-login-overlay');
+  if (overlay) overlay.classList.remove('visible');
+}
+
+async function mobileConnect() {
+  const urlIn = document.getElementById('ml-url-input');
+  const keyIn = document.getElementById('ml-key-input');
+  const btn   = document.getElementById('ml-connect-btn');
+  const st    = document.getElementById('ml-status');
+
+  const url = (urlIn.value || '').trim().replace(/\/+$/, '');
+  const key = (keyIn.value || '').trim();
+
+  if (!url) {
+    st.className = 'error';
+    st.textContent = '⚠️ Saisis l\'URL de ton backend Render';
+    urlIn.focus();
+    return;
+  }
+  if (!url.startsWith('http')) {
+    st.className = 'error';
+    st.textContent = '⚠️ L\'URL doit commencer par https://';
+    urlIn.focus();
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Connexion...';
+  st.className = '';
+  st.textContent = 'Connexion au backend... (Render Free peut prendre jusqu\'à 60s)';
+
+  let secs = 0;
+  const ticker = setInterval(() => {
+    secs++;
+    if (secs < 65) st.textContent = '⏳ Réveil du service... ' + secs + 's (max 60s)';
+  }, 1000);
+
+  const ctrl = new AbortController();
+  const tId  = setTimeout(() => ctrl.abort(), 70000);
+
+  try {
+    const resp = await fetch(url + '/health', {
+      headers: key ? { 'X-API-Key': key } : {},
+      signal: ctrl.signal
+    });
+    clearTimeout(tId); clearInterval(ticker);
+
+    if (resp.status === 401) {
+      st.className = 'error';
+      st.textContent = '🔑 Clé API incorrecte. Vérifie ta API_KEY.';
+      btn.disabled = false; btn.textContent = 'Se connecter →';
+      return;
+    }
+    if (!resp.ok) {
+      st.className = 'error';
+      st.textContent = '❌ Erreur ' + resp.status + ' — vérifie l\'URL';
+      btn.disabled = false; btn.textContent = 'Se connecter →';
+      return;
+    }
+
+    const data = await resp.json();
+    st.className = 'success';
+    st.textContent = '✅ Connecté ! (' + (data.version || '') + ') — chargement...';
+
+    // Save config
+    API_BASE = url;
+    API_KEY  = key;
+    store.set('api_base', url);
+    store.set('api_key',  key);
+
+    // Sync topbar inputs
+    const topUrl = document.getElementById('api-url-input');
+    const topKey = document.getElementById('api-key-input');
+    if (topUrl) topUrl.value = url;
+    if (topKey) topKey.value = key;
+
+    // Also sync cfg page
+    const cfgUrl = document.getElementById('cfg-url');
+    const cfgKey = document.getElementById('cfg-key');
+    if (cfgUrl) cfgUrl.value = url;
+    if (cfgKey) cfgKey.value = key;
+
+    // Reconnect WebSocket with new credentials
+    if (_ws) { try { _ws.close(); } catch(_) {} }
+    setTimeout(wsConnect, 500);
+
+    // Hide overlay and load dashboard
+    setTimeout(() => {
+      hideMobileLogin();
+      if (typeof loadDashboard === 'function') loadDashboard();
+      if (typeof checkHealth  === 'function') checkHealth();
+      toast('✅ Connecté à ' + url, 'success');
+    }, 800);
+
+  } catch (err) {
+    clearTimeout(tId); clearInterval(ticker);
+    btn.disabled = false;
+    btn.textContent = 'Réessayer';
+    if (err.name === 'AbortError') {
+      st.className = 'error';
+      st.textContent = '⏱️ Timeout (70s) — l\'app ne répond pas. Vérifie l\'URL et que le service est déployé.';
+    } else {
+      st.className = 'error';
+      st.textContent = '❌ ' + (err.message || 'Erreur réseau');
+    }
+  }
+}
+
+// Enter key submits
+document.addEventListener('DOMContentLoaded', () => {
+  ['ml-url-input', 'ml-key-input'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') mobileConnect(); });
+  });
+
+  // Auto-show on mobile if not configured
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+                || window.innerWidth < 768;
+  if (!API_BASE && isMobile) {
+    setTimeout(showMobileLogin, 300);
+  }
+
+  // Also hook the existing Config page "Connecter" button if no config
+  if (!API_BASE) {
+    // Show a connect prompt on desktop too via a banner
+    const banner = document.getElementById('no-config-banner');
+    if (banner) banner.style.display = '';
+  }
+});
+
+// Make accessible from config page
+function openMobileLogin() { showMobileLogin(); }
+
 // ════════════════════════════════════════════════════════════
 // WEBSOCKET — Live updates  v13.0.2
 // ════════════════════════════════════════════════════════════
