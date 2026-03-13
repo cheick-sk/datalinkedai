@@ -383,6 +383,9 @@ def init_db():
         # ── NOUVELLES TABLES v10 ──────────────────────────────────────────────
         # Profil utilisateur configurable (1 seule ligne, id=1)
         "CREATE TABLE IF NOT EXISTS user_profile(id INTEGER PRIMARY KEY DEFAULT 1,data TEXT NOT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # Migration v13.1: contact tables (safe — IF NOT EXISTS)
+        "CREATE TABLE IF NOT EXISTS offer_companies(id SERIAL PRIMARY KEY,offer_id INTEGER NOT NULL,company_name TEXT NOT NULL,domain TEXT,website TEXT,city TEXT,sector TEXT,size_estimate TEXT,company_type TEXT DEFAULT \'client_direct\',linkedin_url TEXT,notes TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS offer_contacts(id SERIAL PRIMARY KEY,offer_id INTEGER NOT NULL,company_id INTEGER,first_name TEXT,last_name TEXT,full_name TEXT,email TEXT,phone TEXT,role TEXT,contact_type TEXT DEFAULT \'recruiter\',linkedin_url TEXT,source TEXT DEFAULT \'ai_extracted\',confidence INTEGER DEFAULT 70,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Migration v13: add match_reasons columns if missing
         "ALTER TABLE offers ADD COLUMN IF NOT EXISTS match_reasons TEXT",
         "ALTER TABLE offers ADD COLUMN IF NOT EXISTS gaps TEXT",
@@ -394,6 +397,10 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS interview_sessions(id SERIAL PRIMARY KEY,offer_title TEXT,offer_description TEXT,difficulty TEXT DEFAULT 'medium',messages TEXT DEFAULT '[]',score INTEGER,feedback TEXT,status TEXT DEFAULT 'active',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # Cache scraping
         "CREATE TABLE IF NOT EXISTS scrape_cache(id SERIAL PRIMARY KEY,source TEXT,query_hash TEXT UNIQUE,results TEXT,scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        # ── TABLES CONTACTS OFFRES v13 ────────────────────────────
+        # Entreprises liées à une offre (client final vs intermédiaire séparés)
+        "CREATE TABLE IF NOT EXISTS offer_companies(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER NOT NULL,company_name TEXT NOT NULL,domain TEXT,website TEXT,city TEXT,sector TEXT,size_estimate TEXT,company_type TEXT DEFAULT \'client_direct\',linkedin_url TEXT,notes TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS offer_contacts(id INTEGER PRIMARY KEY AUTOINCREMENT,offer_id INTEGER NOT NULL,company_id INTEGER,first_name TEXT,last_name TEXT,full_name TEXT,email TEXT,phone TEXT,role TEXT,contact_type TEXT DEFAULT \'recruiter\',linkedin_url TEXT,source TEXT DEFAULT \'ai_extracted\',confidence INTEGER DEFAULT 70,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         # ── NOUVELLES TABLES v11 ──────────────────────────────────────────────
         # Calendrier éditorial LinkedIn — posts planifiés
         "CREATE TABLE IF NOT EXISTS linkedin_schedule(id SERIAL PRIMARY KEY,post_id INTEGER,content TEXT NOT NULL,topic TEXT,format TEXT,scheduled_at TIMESTAMP NOT NULL,published_at TIMESTAMP,status TEXT DEFAULT 'scheduled',linkedin_post_id TEXT,error TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
@@ -1582,6 +1589,25 @@ JSON seul.""", 600,
             if not _raw_email and HUNTER_API_KEY:
                 _raw_email = await enrich_company_email(raw.get("company",""), raw.get("domain",""))
 
+            # ── Extraction contacts + entreprises (v13) ──
+            try:
+                _extracted = await extract_offer_contacts(
+                    offer_id=offer_id,
+                    offer_text=raw.get("description", ""),
+                    company_name=raw.get("company", ""),
+                    offer_url=raw.get("url", ""),
+                    offer_title=raw.get("title", "")
+                )
+                await save_offer_contacts(offer_id, _extracted)
+                # Récupérer email du premier contact si pas encore d'email
+                if not _raw_email:
+                    for _ct in _extracted.get("contacts", []):
+                        if _ct.get("email"):
+                            _raw_email = _ct["email"]
+                            break
+            except Exception as _ce:
+                logger.warning(f"Contact extraction offer {offer_id}: {_ce}")
+
             entry = {**result, "offer_id": offer_id,
                      "url": raw.get("url"), "company": raw.get("company"),
                      "source": raw.get("source"), "description": raw.get("description",""),
@@ -2143,9 +2169,9 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": "Erreur interne", "detail": str(exc)[:200]})
 
 app = FastAPI(
-    title="DataLinkedAI API v13.0",
+    title="DataLinkedAI API v13.0.1",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
-    version="13.0.0",
+    version="13.0.1",
     lifespan=lifespan,
     dependencies=[Depends(verify_api_key)],
 )
@@ -2166,7 +2192,7 @@ async def dashboard_ui():
 @app.get("/ping", include_in_schema=False)
 async def ping():
     """Endpoint public minimal — test de connexion sans auth."""
-    return {"ok": True, "auth_required": bool(API_KEY), "version": "13.0.0"}
+    return {"ok": True, "auth_required": bool(API_KEY), "version": "13.0.1"}
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -2180,7 +2206,7 @@ async def favicon():
 async def health():
     token, pid = _get_linkedin_token()
     return {
-        "status": "ok", "version": "13.0.0",
+        "status": "ok", "version": "13.0.1",
         "ai": AI_PROVIDER, "model": AI_MODEL,
         "db": "postgresql" if USE_POSTGRES else "sqlite",
         "email": EMAIL_PROVIDER,
@@ -2408,6 +2434,18 @@ JSON seul.""", 1200)
              _j.dumps(r.get("gaps", []), ensure_ascii=False),
              r.get("negotiation_tip","")))
     log_act("📋", f"Analysee: {r.get('title','')} ({r.get('match_score')}%)", "offers")
+    # Extraction contacts v13
+    if oid:
+        try:
+            _ex = await extract_offer_contacts(
+                offer_id=oid, offer_text=req.text,
+                company_name=r.get("company",""), offer_title=r.get("title","")
+            )
+            await save_offer_contacts(oid, _ex)
+            r["companies"] = _ex.get("companies", [])
+            r["contacts"]  = _ex.get("contacts", [])
+        except Exception as _ce:
+            logger.warning(f"Contact extract manual: {_ce}")
     return r
 
 @app.get("/api/offers", tags=["Offres Freelance"])
@@ -2466,6 +2504,205 @@ class EnrichReq(BaseModel):
     offer_text: str = ""
 
 @app.post("/api/offers/enrich-contact", tags=["Offres Freelance"])
+async def extract_offer_contacts(offer_id: int, offer_text: str, company_name: str = "",
+                                  offer_url: str = "", offer_title: str = "") -> dict:
+    """
+    Extraction complète des contacts et entreprises pour une offre.
+    Distingue entreprise cliente (client_direct) et intermédiaires (esn, cabinet_recrutement).
+    Retourne: {companies: [...], contacts: [...]}
+    """
+    result = {"companies": [], "contacts": []}
+    if not offer_text and not company_name:
+        return result
+
+    # ── ÉTAPE 1 : Extraction IA structurée ──
+    prompt = f"""Analyse ce texte d'offre freelance et extrais TOUTES les entreprises et contacts mentionnés.
+RÈGLE CRITIQUE : distingue bien :
+- "client_direct" = l'entreprise qui a le vrai besoin métier (client final)
+- "esn" = ESN/SSII/société de services qui sous-traite (Capgemini, Sopra, Atos, CGI, etc.)
+- "cabinet_recrutement" = cabinet ou chasseur de têtes (Michael Page, Hays, Robert Half, etc.)
+
+Texte de l'offre : {offer_text[:1200]}
+Entreprise source (si connue) : {company_name or 'inconnue'}
+
+Réponds UNIQUEMENT en JSON :
+{{
+  "companies": [
+    {{
+      "company_name": "<nom exact>",
+      "company_type": "client_direct|esn|cabinet_recrutement|independant|inconnu",
+      "domain": "<domaine.com ou vide>",
+      "city": "<ville ou vide>",
+      "sector": "<secteur ou vide>",
+      "linkedin_url": "<url linkedin entreprise ou vide>"
+    }}
+  ],
+  "contacts": [
+    {{
+      "first_name": "<prénom ou vide>",
+      "last_name": "<nom ou vide>",
+      "full_name": "<prénom nom ou vide>",
+      "email": "<email ou vide>",
+      "phone": "<téléphone ou vide>",
+      "role": "<poste/responsabilité ou vide>",
+      "contact_type": "recruiter|decision_maker|technical|hr",
+      "linkedin_url": "<url linkedin ou vide>",
+      "company_name": "<nom entreprise du contact ou vide>",
+      "confidence": <0-100>
+    }}
+  ]
+}}
+JSON seul, sans markdown."""
+
+    ai_result = await ask_json(prompt, 800, fallback={"companies": [], "contacts": []})
+
+    companies_raw = ai_result.get("companies", [])
+    contacts_raw  = ai_result.get("contacts", [])
+
+    # ── ÉTAPE 2 : Regex fallback sur email/phone/LinkedIn dans le texte ──
+    import re as _re
+    emails_found  = _re.findall("[\\w.+\\-]+@[\\w\\-]+\\.[\\w.]+", offer_text)
+    phones_found  = _re.findall("(?:\\+33|0)[1-9][\\s.\\-]?(?:[0-9]{2}[\\s.\\-]?){4}", offer_text)
+    linkedin_p    = _re.findall("linkedin\\.com/in/([\\w\\-]+)", offer_text)
+    linkedin_c    = _re.findall("linkedin\\.com/company/([\\w\\-]+)", offer_text)
+
+    # Si IA n'a pas trouvé d'email mais regex oui — ajouter au premier contact
+    if emails_found and not any(c.get("email") for c in contacts_raw):
+        if contacts_raw:
+            contacts_raw[0]["email"] = emails_found[0]
+            contacts_raw[0]["confidence"] = max(contacts_raw[0].get("confidence", 70), 80)
+        else:
+            contacts_raw.append({
+                "email": emails_found[0], "phone": phones_found[0] if phones_found else "",
+                "full_name": "", "first_name": "", "last_name": "",
+                "role": "Recruteur", "contact_type": "recruiter",
+                "linkedin_url": "", "company_name": company_name or "", "confidence": 75
+            })
+
+    # Phones non rattachés
+    if phones_found:
+        for c in contacts_raw:
+            if not c.get("phone"):
+                c["phone"] = phones_found[0]; break
+
+    # LinkedIn company
+    for lc in linkedin_c[:1]:
+        for comp in companies_raw:
+            if not comp.get("linkedin_url"):
+                comp["linkedin_url"] = f"https://www.linkedin.com/company/{lc}"; break
+
+    # ── ÉTAPE 3 : Hunter.io pour les emails manquants ──
+    if HUNTER_API_KEY:
+        for comp in companies_raw:
+            cname = comp.get("company_name", "")
+            cdomain = comp.get("domain", "")
+            if cname and comp.get("company_type") in ("client_direct", "esn"):
+                hunter_email = await enrich_company_email(cname, cdomain)
+                if hunter_email:
+                    # Associer cet email au contact de cette entreprise
+                    found_contact = next((c for c in contacts_raw
+                                         if c.get("company_name","").lower() == cname.lower()), None)
+                    if found_contact:
+                        if not found_contact.get("email"):
+                            found_contact["email"] = hunter_email
+                            found_contact["source"] = "hunter_io"
+                    else:
+                        contacts_raw.append({
+                            "email": hunter_email, "full_name": "", "first_name": "", "last_name": "",
+                            "phone": "", "role": "Contact", "contact_type": "recruiter",
+                            "linkedin_url": "", "company_name": cname, "confidence": 65,
+                            "source": "hunter_io"
+                        })
+                    if not comp.get("domain") and "@" in hunter_email:
+                        comp["domain"] = hunter_email.split("@")[1]
+
+    # ── ÉTAPE 4 : Si aucune company trouvée, utiliser company_name de l'offre ──
+    if not companies_raw and company_name:
+        # Heuristique : détecter si c'est une ESN connue
+        esn_keywords = ["capgemini","sopra","atos","cgi","accenture","ibm","devoteam","alten","altran",
+                        "aubay","inetum","wavestone","pwc","deloitte","kpmg","ernst","sqli","infotel",
+                        "sii","sfeir","publicis","talan","hardis","néosoft","neosoft","davidson"]
+        cab_keywords = ["hays","michael page","robert half","randstad","adecco","manpower","expectra",
+                        "talent","recrutement","hunt","search","staffing","talent"]
+        cname_low = company_name.lower()
+        ctype = "client_direct"
+        if any(k in cname_low for k in esn_keywords): ctype = "esn"
+        elif any(k in cname_low for k in cab_keywords): ctype = "cabinet_recrutement"
+        companies_raw.append({
+            "company_name": company_name, "company_type": ctype,
+            "domain": "", "city": "", "sector": "", "linkedin_url": ""
+        })
+
+    result["companies"] = companies_raw
+    result["contacts"]  = contacts_raw
+    return result
+
+
+async def save_offer_contacts(offer_id: int, extracted: dict) -> dict:
+    """
+    Persiste en base les companies + contacts extraits pour une offre.
+    Retourne les IDs créés.
+    """
+    company_ids = {}  # company_name -> id
+    contacts_saved = 0
+
+    with db_conn() as conn:
+        # Save companies
+        for comp in extracted.get("companies", []):
+            cname = (comp.get("company_name") or "").strip()
+            if not cname:
+                continue
+            try:
+                cur = db_exec(conn,
+                    "INSERT OR IGNORE INTO offer_companies(offer_id,company_name,domain,website,city,sector,company_type,linkedin_url) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (offer_id, cname, comp.get("domain",""), comp.get("website",""),
+                     comp.get("city",""), comp.get("sector",""),
+                     comp.get("company_type","inconnu"), comp.get("linkedin_url",""))
+                )
+                # Get the id (existing or new)
+                row = db_exec(conn,
+                    "SELECT id FROM offer_companies WHERE offer_id=? AND company_name=? AND company_type=?",
+                    (offer_id, cname, comp.get("company_type","inconnu"))
+                ).fetchone()
+                if row:
+                    company_ids[cname.lower()] = row[0]
+            except Exception as e:
+                logger.warning(f"save company {cname}: {e}")
+
+        # Save contacts
+        for ct in extracted.get("contacts", []):
+            fname  = (ct.get("first_name") or "").strip()
+            lname  = (ct.get("last_name") or "").strip()
+            fname_full = (ct.get("full_name") or f"{fname} {lname}").strip()
+            email  = (ct.get("email") or "").strip().lower()
+            phone  = (ct.get("phone") or "").strip()
+            role   = (ct.get("role") or "").strip()
+            ctype  = ct.get("contact_type", "recruiter")
+            li_url = (ct.get("linkedin_url") or "").strip()
+            source = ct.get("source", "ai_extracted")
+            conf   = int(ct.get("confidence", 70))
+            cname_ref = (ct.get("company_name") or "").strip().lower()
+            comp_id = company_ids.get(cname_ref)
+
+            if not (fname_full or email or phone):
+                continue  # rien d'utile
+
+            try:
+                db_exec(conn,
+                    "INSERT INTO offer_contacts(offer_id,company_id,first_name,last_name,full_name,"
+                    "email,phone,role,contact_type,linkedin_url,source,confidence) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (offer_id, comp_id, fname, lname, fname_full,
+                     email, phone, role, ctype, li_url, source, conf)
+                )
+                contacts_saved += 1
+            except Exception as e:
+                logger.warning(f"save contact {fname_full}: {e}")
+
+    return {"companies_saved": len(company_ids), "contacts_saved": contacts_saved}
+
+
 async def enrich_contact(req: EnrichReq, _=Depends(verify_api_key)):
     """Enrichit automatiquement le contact recruteur depuis le nom de l'entreprise + texte offre."""
     result = {"company": req.company, "email": "", "linkedin": "", "source": ""}
@@ -3630,6 +3867,137 @@ async def set_outcome(neg_id: int, outcome: str, _=Depends(verify_api_key)):
 # ══════════════════════════════════════════════════════
 #  ANALYTICS FREELANCE
 # ══════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════
+# CONTACTS & ENTREPRISES PAR OFFRE  v13.0.1
+# ════════════════════════════════════════════════════
+
+@app.get("/api/offers/{offer_id}/contacts", tags=["Contacts Offres"])
+async def get_offer_contacts(offer_id: int, _=Depends(verify_api_key)):
+    """Retourne les entreprises et contacts extraits pour une offre précise."""
+    with db_conn() as conn:
+        companies = db_exec(conn,
+            "SELECT id,company_name,company_type,domain,website,city,sector,linkedin_url,notes "
+            "FROM offer_companies WHERE offer_id=? ORDER BY company_type",
+            (offer_id,)).fetchall()
+        contacts = db_exec(conn,
+            "SELECT oc.id,oc.first_name,oc.last_name,oc.full_name,oc.email,oc.phone,"
+            "oc.role,oc.contact_type,oc.linkedin_url,oc.source,oc.confidence,"
+            "comp.company_name,comp.company_type "
+            "FROM offer_contacts oc "
+            "LEFT JOIN offer_companies comp ON comp.id=oc.company_id "
+            "WHERE oc.offer_id=? ORDER BY oc.confidence DESC",
+            (offer_id,)).fetchall()
+    cols_comp = ["id","company_name","company_type","domain","website","city","sector","linkedin_url","notes"]
+    cols_ct   = ["id","first_name","last_name","full_name","email","phone","role",
+                 "contact_type","linkedin_url","source","confidence","company_name","company_type"]
+    return {
+        "offer_id": offer_id,
+        "companies": [dict(zip(cols_comp, r)) for r in companies],
+        "contacts":  [dict(zip(cols_ct, r)) for r in contacts],
+    }
+
+
+@app.get("/api/contacts/all", tags=["Contacts Offres"])
+async def list_all_contacts(
+    company_type: str = "", contact_type: str = "",
+    has_email: bool = False, limit: int = 100, offset: int = 0,
+    _=Depends(verify_api_key)
+):
+    """Liste globale de tous les contacts extraits, avec filtres optionnels."""
+    with db_conn() as conn:
+        clauses, params = [], []
+        if company_type:
+            clauses.append("comp.company_type=?"); params.append(company_type)
+        if contact_type:
+            clauses.append("oc.contact_type=?"); params.append(contact_type)
+        if has_email:
+            clauses.append("oc.email!='' AND oc.email IS NOT NULL")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        total = db_exec(conn,
+            f"SELECT COUNT(*) FROM offer_contacts oc "
+            f"LEFT JOIN offer_companies comp ON comp.id=oc.company_id {where}", params).fetchone()[0]
+        rows = db_exec(conn,
+            f"SELECT oc.id,oc.full_name,oc.first_name,oc.last_name,oc.email,oc.phone,"
+            f"oc.role,oc.contact_type,oc.linkedin_url,oc.source,oc.confidence,"
+            f"comp.company_name,comp.company_type,comp.city,comp.sector,"
+            f"o.title as offer_title,oc.offer_id,oc.created_at "
+            f"FROM offer_contacts oc "
+            f"LEFT JOIN offer_companies comp ON comp.id=oc.company_id "
+            f"LEFT JOIN offers o ON o.id=oc.offer_id "
+            f"{where} ORDER BY oc.confidence DESC, oc.created_at DESC "
+            f"LIMIT {min(limit,500)} OFFSET {offset}", params).fetchall()
+    cols = ["id","full_name","first_name","last_name","email","phone","role","contact_type",
+            "linkedin_url","source","confidence","company_name","company_type","city","sector",
+            "offer_title","offer_id","created_at"]
+    return {
+        "total": total, "offset": offset, "limit": limit,
+        "items": [dict(zip(cols, r)) for r in rows]
+    }
+
+
+@app.get("/api/companies/all", tags=["Contacts Offres"])
+async def list_all_companies(company_type: str = "", limit: int = 100, _=Depends(verify_api_key)):
+    """Liste toutes les entreprises identifiées, avec déduplication par nom."""
+    with db_conn() as conn:
+        where = "WHERE company_type=?" if company_type else ""
+        params = [company_type] if company_type else []
+        rows = db_exec(conn,
+            f"SELECT company_name,company_type,domain,city,sector,linkedin_url,"
+            f"COUNT(*) as nb_offres,MAX(created_at) as last_seen "
+            f"FROM offer_companies {where} "
+            f"GROUP BY company_name,company_type "
+            f"ORDER BY nb_offres DESC LIMIT {min(limit,500)}", params).fetchall()
+    cols = ["company_name","company_type","domain","city","sector","linkedin_url","nb_offres","last_seen"]
+    return {"total": len(rows), "items": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/api/offers/{offer_id}/contacts/refresh", tags=["Contacts Offres"])
+async def refresh_offer_contacts(offer_id: int, _=Depends(verify_api_key)):
+    """Relance l'extraction IA pour une offre (utile si l'IA a loupé des infos)."""
+    with db_conn() as conn:
+        row = db_exec(conn,
+            "SELECT description,title,source FROM offers WHERE id=?", (offer_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Offre introuvable")
+    desc, title, source = row
+    extracted = await extract_offer_contacts(
+        offer_id=offer_id, offer_text=desc or "",
+        company_name=source or "", offer_title=title or ""
+    )
+    # Purge existing contacts for this offer then re-save
+    with db_conn() as conn:
+        db_exec(conn, "DELETE FROM offer_contacts WHERE offer_id=?", (offer_id,))
+        db_exec(conn, "DELETE FROM offer_companies WHERE offer_id=?", (offer_id,))
+    saved = await save_offer_contacts(offer_id, extracted)
+    return {
+        "offer_id": offer_id, "title": title,
+        **saved,
+        "companies": extracted["companies"],
+        "contacts": extracted["contacts"]
+    }
+
+
+@app.post("/api/contacts/{contact_id}/export-crm", tags=["Contacts Offres"])
+async def export_contact_to_crm(contact_id: int, _=Depends(verify_api_key)):
+    """Copie le contact vers email_contacts (pipeline prospection existant)."""
+    with db_conn() as conn:
+        row = db_exec(conn,
+            "SELECT oc.full_name,oc.email,oc.phone,oc.role,oc.contact_type,"
+            "comp.company_name,comp.company_type "
+            "FROM offer_contacts oc "
+            "LEFT JOIN offer_companies comp ON comp.id=oc.company_id "
+            "WHERE oc.id=?", (contact_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Contact introuvable")
+        name,email,phone,role,ctype,cname,comptype = row
+        notes = f"Type: {ctype} | Entreprise ({comptype}): {cname}"
+        db_exec(conn,
+            "INSERT OR IGNORE INTO email_contacts(name,email,company,role,source,notes) "
+            "VALUES(?,?,?,?,?,?)",
+            (name or "", email or "", cname or "", role or "", "offer_contact", notes))
+    return {"exported": True, "name": name, "email": email, "company": cname}
+
 
 @app.get("/api/market/trends", tags=["Analytics"])
 async def market_trends(_=Depends(verify_api_key)):

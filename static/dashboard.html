@@ -294,6 +294,7 @@ nav{-webkit-overflow-scrolling:touch}
     <button class="nav-item" onclick="go('cv')"><span class="ico">📄</span> CV Adaptatif</button>
     <button class="nav-item" onclick="go('proposal')"><span class="ico">📑</span> Propositions</button>
     <button class="nav-item" onclick="go('audit')"><span class="ico">🔍</span> Audit Profil</button>
+    <button class="nav-item" onclick="go('contacts')"><span class="ico">👥</span> Contacts</button>
     <div class="nav-section">Système</div>
     <button class="nav-item" onclick="go('analytics')"><span class="ico">📈</span> Analytics</button>
     <button class="nav-item" onclick="go('validation')" id="nav-validation"><span class="ico">✅</span> Validation <span id="validation-badge" style="display:none;background:#EF4444;color:white;border-radius:10px;padding:1px 6px;font-size:.62rem;margin-left:auto;font-weight:700"></span></button>
@@ -1364,6 +1365,7 @@ function go(page) {
   if(page === 'config') { checkHealth(); loadNotifStatus(); loadScraperStats(); }
   if(page === 'validation') loadValidation();
   if(page === 'analytics') { loadAnalytics(); loadMarketTrends(); }
+  if(page === 'contacts') loadContactsPage();
   if(page === 'interview') loadInterviewSessions();
   if(page === 'profile-edit') loadProfileEdit();
 }
@@ -1741,6 +1743,10 @@ function offerRow(o) {
         ${gaps.map(g=>`<div style="font-size:.72rem;color:var(--amber)">⚠ ${g}</div>`).join('')}
       </div>` : ''}
       ${tip ? `<div style="margin-top:.4rem;font-size:.72rem;color:var(--blue);background:var(--blue-soft);border-radius:4px;padding:.3rem .5rem">💡 ${tip}</div>` : ''}
+      <div style="margin-top:.5rem">
+        <button class="btn btn-secondary btn-sm" style="font-size:.65rem;padding:2px 8px"
+          onclick="loadOfferContacts(${o.id},'${(o.title||'').replace(/'/g,'').replace(/`/g,'')}')">👥 Contacts</button>
+      </div>
     </div>
   </div>`;
 }
@@ -3933,6 +3939,254 @@ async function checkLinkedInPending() {
 }
 
 
+
+// ════════════════════════════════════════════════════════════════
+// CONTACTS & ENTREPRISES  v13.0.1
+// ════════════════════════════════════════════════════════════════
+
+function showContactTab(tab) {
+  document.getElementById('ct-panel-contacts').style.display  = tab === 'contacts'  ? '' : 'none';
+  document.getElementById('ct-panel-companies').style.display = tab === 'companies' ? '' : 'none';
+  document.querySelectorAll('#page-contacts .tab-btn').forEach((b,i)=>{
+    b.classList.toggle('active', (tab==='contacts'&&i===0)||(tab==='companies'&&i===1));
+  });
+  if (tab === 'contacts')  loadContactsPage();
+  if (tab === 'companies') loadCompaniesPage();
+}
+
+const COMPANY_TYPE_LABELS = {
+  client_direct: {label:'Client direct', color:'var(--blue)'},
+  esn: {label:'ESN / SSII', color:'var(--amber)'},
+  cabinet_recrutement: {label:'Cabinet recrutement', color:'#8B5CF6'},
+  independant: {label:'Indépendant', color:'var(--green)'},
+  inconnu: {label:'Inconnu', color:'var(--dim)'},
+};
+const CONTACT_TYPE_LABELS = {
+  recruiter: {label:'Recruteur', icon:'🎯'},
+  decision_maker: {label:'Décideur', icon:'👔'},
+  technical: {label:'Technique', icon:'⚙️'},
+  hr: {label:'RH', icon:'👤'},
+};
+function compTypeBadge(t) {
+  const info = COMPANY_TYPE_LABELS[t] || {label:t||'?', color:'var(--dim)'};
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:.68rem;font-weight:700;background:' + info.color + '22;color:' + info.color + '">' + info.label + '</span>';
+}
+function ctTypeBadge(t) {
+  const info = CONTACT_TYPE_LABELS[t] || {label:t||'?', icon:'👤'};
+  return info.icon + ' <span style="font-size:.72rem;color:var(--dim)">' + info.label + '</span>';
+}
+function confBar(n) {
+  const pct = Math.max(0, Math.min(100, n||0));
+  const col = pct>=80 ? 'var(--green)' : pct>=60 ? 'var(--amber)' : 'var(--red)';
+  return '<div style="display:flex;align-items:center;gap:.3rem"><div style="width:40px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+col+'"></div></div><span style="font-size:.65rem;color:var(--dim)">'+pct+'%</span></div>';
+}
+
+async function loadContactsPage() {
+  const el = document.getElementById('contacts-table-wrap');
+  if (!el) return;
+  const ctype    = document.getElementById('ct-filter-company-type')?.value || '';
+  const cttype   = document.getElementById('ct-filter-type')?.value || '';
+  const hasEmail = document.getElementById('ct-filter-email')?.checked || false;
+  el.innerHTML = '<div class="empty"><div class="emoji">🔄</div><p>Chargement...</p></div>';
+  try {
+    let qs = '/api/contacts/all?limit=200';
+    if (ctype)    qs += '&company_type=' + encodeURIComponent(ctype);
+    if (cttype)   qs += '&contact_type=' + encodeURIComponent(cttype);
+    if (hasEmail) qs += '&has_email=true';
+    const d = await api('GET', qs);
+    const badge = document.getElementById('ct-total-badge');
+    if (badge) badge.textContent = d.total + ' contact(s)';
+    if (!d.items || !d.items.length) {
+      el.innerHTML = '<div class="empty"><div class="emoji">👤</div><p>Aucun contact. Lance le Copilot pour analyser des offres.</p></div>';
+      return;
+    }
+    let html = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.8rem">';
+    html += '<thead><tr style="background:var(--surface)">';
+    ['Nom', 'Rôle', 'Email', 'Téléphone', 'Entreprise', 'Type', 'Confiance', 'Offre', ''].forEach(h=>{
+      html += '<th style="padding:.5rem .6rem;text-align:left;font-size:.7rem;font-weight:700;color:var(--dim);white-space:nowrap;border-bottom:1px solid var(--border)">'+h+'</th>';
+    });
+    html += '</tr></thead><tbody>';
+    d.items.forEach(function(c) {
+      html += '<tr style="border-bottom:.5px solid var(--border)">';
+      html += '<td style="padding:.45rem .6rem"><div style="font-weight:600;color:var(--ink)">' + (c.full_name||'—') + '</div>';
+      if (c.linkedin_url) html += '<a href="'+c.linkedin_url+'" target="_blank" style="font-size:.68rem;color:var(--blue)">LinkedIn ↗</a>';
+      html += '</td>';
+      html += '<td style="padding:.45rem .6rem;color:var(--ink2)">' + ctTypeBadge(c.contact_type) + (c.role ? '<br><span style="font-size:.72rem;color:var(--dim)">'+c.role+'</span>' : '') + '</td>';
+      html += '<td style="padding:.45rem .6rem">';
+      if (c.email) html += '<a href="mailto:'+c.email+'" style="color:var(--blue);font-size:.78rem">'+c.email+'</a>';
+      else         html += '<span style="color:var(--dim)">—</span>';
+      html += '</td>';
+      html += '<td style="padding:.45rem .6rem;color:var(--ink2);white-space:nowrap">' + (c.phone||'—') + '</td>';
+      html += '<td style="padding:.45rem .6rem"><div style="font-weight:500">' + (c.company_name||'—') + '</div>';
+      if (c.city) html += '<div style="font-size:.68rem;color:var(--dim)">'+c.city+'</div>';
+      html += '</td>';
+      html += '<td style="padding:.45rem .6rem">' + compTypeBadge(c.company_type) + '</td>';
+      html += '<td style="padding:.45rem .6rem">' + confBar(c.confidence) + '</td>';
+      html += '<td style="padding:.45rem .6rem;font-size:.72rem;color:var(--dim);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (c.offer_title||'—') + '</td>';
+      html += '<td style="padding:.45rem .6rem">';
+      html += '<div style="display:flex;gap:.3rem">';
+      if (c.email) html += '<button class="btn btn-primary btn-sm" style="font-size:.65rem;padding:2px 6px" onclick="quickEmailContact('+JSON.stringify(c.email)+','+JSON.stringify(c.full_name||'')+','+JSON.stringify(c.company_name||'')+')">✉</button>';
+      html += '<button class="btn btn-secondary btn-sm" style="font-size:.65rem;padding:2px 6px" onclick="exportContactToCRM('+c.id+',this)">CRM</button>';
+      html += '</div></td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red)">Erreur: ' + e.message + '</div>';
+  }
+}
+
+async function loadCompaniesPage() {
+  const el = document.getElementById('companies-table-wrap');
+  if (!el) return;
+  const ctype = document.getElementById('co-filter-type')?.value || '';
+  el.innerHTML = '<div class="empty"><div class="emoji">🔄</div><p>Chargement...</p></div>';
+  try {
+    let qs = '/api/companies/all?limit=200';
+    if (ctype) qs += '&company_type=' + encodeURIComponent(ctype);
+    const d = await api('GET', qs);
+    const badge = document.getElementById('co-total-badge');
+    if (badge) badge.textContent = d.total + ' entreprise(s)';
+    if (!d.items || !d.items.length) {
+      el.innerHTML = '<div class="empty"><div class="emoji">🏢</div><p>Aucune entreprise. Lance le Copilot pour analyser des offres.</p></div>';
+      return;
+    }
+    let html = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.8rem">';
+    html += '<thead><tr style="background:var(--surface)">';
+    ['Entreprise', 'Type', 'Domaine', 'Ville', 'Secteur', 'Offres', ''].forEach(h=>{
+      html += '<th style="padding:.5rem .6rem;text-align:left;font-size:.7rem;font-weight:700;color:var(--dim);border-bottom:1px solid var(--border)">'+h+'</th>';
+    });
+    html += '</tr></thead><tbody>';
+    d.items.forEach(function(c) {
+      html += '<tr style="border-bottom:.5px solid var(--border)">';
+      html += '<td style="padding:.45rem .6rem"><div style="font-weight:600;color:var(--ink)">' + (c.company_name||'—') + '</div>';
+      if (c.linkedin_url) html += '<a href="'+c.linkedin_url+'" target="_blank" style="font-size:.68rem;color:var(--blue)">LinkedIn ↗</a>';
+      html += '</td>';
+      html += '<td style="padding:.45rem .6rem">' + compTypeBadge(c.company_type) + '</td>';
+      html += '<td style="padding:.45rem .6rem;font-size:.75rem;color:var(--dim)">' + (c.domain ? '<a href="https://'+c.domain+'" target="_blank" style="color:var(--blue)">'+c.domain+'</a>' : '—') + '</td>';
+      html += '<td style="padding:.45rem .6rem;font-size:.75rem;color:var(--ink2)">' + (c.city||'—') + '</td>';
+      html += '<td style="padding:.45rem .6rem;font-size:.75rem;color:var(--ink2)">' + (c.sector||'—') + '</td>';
+      html += '<td style="padding:.45rem .6rem;text-align:center"><span style="font-weight:700;color:var(--blue)">' + (c.nb_offres||0) + '</span></td>';
+      html += '<td style="padding:.45rem .6rem">';
+      html += '<button class="btn btn-secondary btn-sm" style="font-size:.65rem;padding:2px 6px" onclick="loadContactsByCompany('+JSON.stringify(c.company_name)+')">Contacts</button>';
+      html += '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red)">Erreur: ' + e.message + '</div>';
+  }
+}
+
+async function quickEmailContact(email, name, company) {
+  if (!email) return;
+  go('email');
+  setTimeout(function() {
+    const to = document.getElementById('send-to');
+    const sub = document.getElementById('send-subject');
+    if (to) to.value = email;
+    if (sub) sub.value = 'Opportunité Freelance — ' + (company || '');
+    toast('Contact ' + (name||email) + ' pré-rempli dans Email', 'success');
+  }, 300);
+}
+
+async function exportContactToCRM(contactId, btn) {
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const r = await api('POST', '/api/contacts/' + contactId + '/export-crm');
+    toast((r.name||'Contact') + ' exporté vers CRM', 'success');
+    btn.textContent = '✓';
+  } catch(e) {
+    toast('Erreur: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = 'CRM';
+  }
+}
+
+async function loadContactsByCompany(companyName) {
+  showContactTab('contacts');
+  await loadContactsPage();
+}
+
+async function loadOfferContacts(offerId, offerTitle) {
+  const drawer = document.getElementById('offer-contacts-drawer');
+  const titleEl = document.getElementById('offer-contacts-title');
+  const contentEl = document.getElementById('offer-contacts-content');
+  const refreshBtn = document.getElementById('offer-contacts-refresh-btn');
+  if (!drawer) return;
+  drawer.style.display = '';
+  if (titleEl) titleEl.textContent = 'Contacts — ' + (offerTitle || ('Offre #' + offerId));
+  if (contentEl) contentEl.innerHTML = '<div class="empty"><div class="emoji">🔄</div><p>Chargement...</p></div>';
+  if (refreshBtn) {
+    refreshBtn.onclick = function() { refreshOfferContacts(offerId, offerTitle); };
+  }
+  try {
+    const d = await api('GET', '/api/offers/' + offerId + '/contacts');
+    let html = '';
+    if (!d.companies.length && !d.contacts.length) {
+      html = '<div class="empty"><div class="emoji">🔍</div><p>Aucun contact extrait.</p><button class="btn btn-primary btn-sm" data-oid="' + offerId + '" data-otitle="' + (offerTitle||'').replace(/"/g,'') + '" onclick="refreshOfferContactsEl(this)">🔄 Analyser maintenant</button></div>';
+    } else {
+      if (d.companies.length) {
+        html += '<div style="margin-bottom:1rem"><div style="font-size:.75rem;font-weight:700;color:var(--dim);margin-bottom:.5rem;text-transform:uppercase">Entreprises (' + d.companies.length + ')</div>';
+        html += '<div style="display:flex;flex-wrap:wrap;gap:.5rem">';
+        d.companies.forEach(function(c) {
+          html += '<div style="padding:.5rem .75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border)">';
+          html += '<div style="font-weight:600;font-size:.82rem">' + c.company_name + '</div>';
+          html += '<div style="margin-top:.2rem">' + compTypeBadge(c.company_type) + '</div>';
+          if (c.city) html += '<div style="font-size:.7rem;color:var(--dim);margin-top:.15rem">📍 ' + c.city + '</div>';
+          if (c.domain) html += '<div style="font-size:.7rem;color:var(--blue);margin-top:.1rem">' + c.domain + '</div>';
+          html += '</div>';
+        });
+        html += '</div></div>';
+      }
+      if (d.contacts.length) {
+        html += '<div><div style="font-size:.75rem;font-weight:700;color:var(--dim);margin-bottom:.5rem;text-transform:uppercase">Contacts (' + d.contacts.length + ')</div>';
+        d.contacts.forEach(function(c) {
+          html += '<div style="display:flex;align-items:flex-start;gap:.75rem;padding:.6rem 0;border-bottom:.5px solid var(--border)">';
+          html += '<div style="flex:1">';
+          html += '<div style="font-weight:600;font-size:.85rem">' + (c.full_name||'—') + '</div>';
+          if (c.role) html += '<div style="font-size:.75rem;color:var(--ink2)">' + c.role + '</div>';
+          html += '<div style="font-size:.72rem;color:var(--dim);margin-top:.1rem">' + (c.company_name||'') + (c.company_type ? ' · ' + compTypeBadge(c.company_type) : '') + '</div>';
+          html += '</div><div style="text-align:right;min-width:130px">';
+          if (c.email) html += '<a href="mailto:'+c.email+'" style="display:block;font-size:.75rem;color:var(--blue)">'+c.email+'</a>';
+          if (c.phone) html += '<div style="font-size:.75rem;color:var(--ink2)">'+c.phone+'</div>';
+          html += confBar(c.confidence);
+          html += '</div></div>';
+        });
+        html += '</div>';
+      }
+    }
+    if (contentEl) contentEl.innerHTML = html;
+    drawer.scrollIntoView({behavior:'smooth', block:'nearest'});
+  } catch(e) {
+    if (contentEl) contentEl.innerHTML = '<div style="color:var(--red)">Erreur: ' + e.message + '</div>';
+  }
+}
+
+async function refreshOfferContactsEl(btn) {
+  const oid   = parseInt(btn.dataset.oid);
+  const title = btn.dataset.otitle || '';
+  await refreshOfferContacts(oid, title);
+}
+
+async function refreshOfferContacts(offerId, offerTitle) {
+  const btn = document.getElementById('offer-contacts-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  try {
+    await api('POST', '/api/offers/' + offerId + '/contacts/refresh');
+    toast('Contacts réanalysés', 'success');
+    await loadOfferContacts(offerId, offerTitle);
+  } catch(e) {
+    toast('Erreur: ' + e.message, 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 Réanalyser'; }
+}
+
+function closeOfferContactsDrawer() {
+  const el = document.getElementById('offer-contacts-drawer');
+  if (el) el.style.display = 'none';
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DataLinkedAI v13 — Nouvelles fonctions JS
 // ═══════════════════════════════════════════════════════════════
@@ -4057,7 +4311,7 @@ async function loadMarketTrends() {
 }
 
 // -- VERSION v13 -----------------------------------------------
-console.log('%c DataLinkedAI v13.0 ✅', 'color:#1A56FF;font-weight:bold;font-size:14px');
+console.log('%c DataLinkedAI v13.0.1 ✅', 'color:#1A56FF;font-weight:bold;font-size:14px');
 
 // -- LIEN MOBILE / QR CODE -----------------------------------------
 function showConnectQR() {
@@ -4156,5 +4410,74 @@ window.onload = () => {
   }
 };
 </script>
+<!-- ════════════════════════════════════════════════
+     PAGE: CONTACTS & ENTREPRISES  v13.0.1
+════════════════════════════════════════════════ -->
+<div id="page-contacts" class="page" style="display:none">
+  <div class="page-header">
+    <div><h1>👥 Contacts & Entreprises</h1>
+      <p>Tous les contacts et entreprises extraits automatiquement de chaque offre.</p></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadContactsPage()">🔄 Actualiser</button>
+  </div>
+
+  <!-- Onglets -->
+  <div class="tab-bar" style="margin-bottom:1rem">
+    <button class="tab-btn active" onclick="showContactTab('contacts')">👤 Contacts</button>
+    <button class="tab-btn" onclick="showContactTab('companies')">🏢 Entreprises</button>
+  </div>
+
+  <!-- Filtres Contacts -->
+  <div id="ct-panel-contacts">
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;align-items:center">
+      <select id="ct-filter-type" onchange="loadContactsPage()" style="padding:.4rem .6rem;border:1px solid var(--border);border-radius:6px;font-size:.8rem;background:var(--surface)">
+        <option value="">Tous types</option>
+        <option value="recruiter">Recruteur</option>
+        <option value="decision_maker">Décideur</option>
+        <option value="technical">Technique</option>
+        <option value="hr">RH</option>
+      </select>
+      <select id="ct-filter-company-type" onchange="loadContactsPage()" style="padding:.4rem .6rem;border:1px solid var(--border);border-radius:6px;font-size:.8rem;background:var(--surface)">
+        <option value="">Toutes entreprises</option>
+        <option value="client_direct">Client direct</option>
+        <option value="esn">ESN / SSII</option>
+        <option value="cabinet_recrutement">Cabinet recrutement</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--ink2)">
+        <input type="checkbox" id="ct-filter-email" onchange="loadContactsPage()"> Email requis
+      </label>
+      <span id="ct-total-badge" style="margin-left:auto;font-size:.75rem;color:var(--dim)"></span>
+    </div>
+    <div id="contacts-table-wrap"></div>
+  </div>
+
+  <!-- Entreprises -->
+  <div id="ct-panel-companies" style="display:none">
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;align-items:center">
+      <select id="co-filter-type" onchange="loadCompaniesPage()" style="padding:.4rem .6rem;border:1px solid var(--border);border-radius:6px;font-size:.8rem;background:var(--surface)">
+        <option value="">Tous types</option>
+        <option value="client_direct">Client direct</option>
+        <option value="esn">ESN / SSII</option>
+        <option value="cabinet_recrutement">Cabinet recrutement</option>
+        <option value="inconnu">Inconnu</option>
+      </select>
+      <span id="co-total-badge" style="margin-left:auto;font-size:.75rem;color:var(--dim)"></span>
+    </div>
+    <div id="companies-table-wrap"></div>
+  </div>
+
+  <!-- Panneau latéral détail offre (contacts de l'offre) -->
+  <div id="offer-contacts-drawer" style="display:none;margin-top:1.5rem">
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem">
+        <h3 style="margin:0" id="offer-contacts-title">Contacts de l'offre</h3>
+        <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="closeOfferContactsDrawer()">✕ Fermer</button>
+        <button class="btn btn-secondary btn-sm" id="offer-contacts-refresh-btn">🔄 Réanalyser</button>
+      </div>
+      <div id="offer-contacts-content"></div>
+    </div>
+  </div>
+</div>
+
+
 </body>
           '<button class="btn btn-primary btn-sm" style="margin-top:.4rem" ' + 'data-tid="' + draftId + '" data-email="' + (r.email||'') + '" data-title="' + (r.title||'') + '" onclick="sendDraftReplyEl(this)">📤 Envoyer</button>' +
