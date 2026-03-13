@@ -2160,14 +2160,6 @@ async def lifespan(app: FastAPI):
     logger.info("DataLinkedAI arrêté proprement.")
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Catch-all — retourne JSON propre au lieu d'une stacktrace HTML."""
-    if isinstance(exc, HTTPException):
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
-    logger.error(f"Unhandled exception {request.url}: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"error": "Erreur interne", "detail": str(exc)[:200]})
-
 app = FastAPI(
     title="DataLinkedAI API v13.0.1",
     description="Plateforme freelance data automatisée | Sekouna KABA | TJM 500-900€",
@@ -2202,6 +2194,14 @@ async def favicon():
     return HTMLResponse("", status_code=204)
 
 # ── Health ───────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    logger.error(f"Unhandled exception {request.url}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"error": "Erreur interne", "detail": str(exc)[:200]})
+
 @app.get("/health", tags=["Système"])
 async def health():
     token, pid = _get_linkedin_token()
