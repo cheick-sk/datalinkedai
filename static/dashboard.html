@@ -995,6 +995,7 @@ nav{-webkit-overflow-scrolling:touch}
       </div>
       <button class="btn btn-primary" onclick="saveConfig()">💾 Sauvegarder & Tester</button>
       <button class="btn btn-secondary" onclick="showConnectQR()" title="Générer un lien QR pour iPhone/Android">📱 Lien mobile</button>
+      <button class="btn btn-secondary" onclick="copyPermLink()" title="Copier un lien avec clé intégrée — à mettre en favori iPhone">🔗 Lien permanent</button>
     </div>
     <div class="card">
       <h3>📋 Health Check</h3>
@@ -1336,13 +1337,32 @@ HUNTER_API_KEY=...               # hunter.io — enrichissement email recruteur<
 <script>
 // -- CONFIG --------------------------------------------------------
 // Stockage sécurisé - fonctionne avec ou sans localStorage
+// Cookie helper — seul stockage fiable sur iOS Safari mode privé
+function _saveCookie(name, value, days) {
+  try {
+    const exp = new Date();
+    exp.setTime(exp.getTime() + days * 24 * 60 * 60 * 1000);
+    document.cookie = name + '=' + encodeURIComponent(value) +
+      ';expires=' + exp.toUTCString() + ';path=/;SameSite=Lax';
+  } catch(e) {}
+}
+
 // Triple-fallback storage: localStorage → sessionStorage → memory → cookie
 const store = {
   _mem: {},
   get(k) {
-    // sessionStorage d'abord (fonctionne en iOS private), puis localStorage, puis mémoire
+    // sessionStorage → localStorage → cookie → mémoire
     try { const v = sessionStorage.getItem(k); if (v !== null && v !== '') return v; } catch(e) {}
     try { const v = localStorage.getItem(k);   if (v !== null && v !== '') return v; } catch(e) {}
+    // Cookie fallback — clé principale pour iOS Safari qui bloque localStorage
+    try {
+      const name = 'dl_' + k + '=';
+      const ca = document.cookie.split(';');
+      for (let c of ca) {
+        c = c.trim();
+        if (c.startsWith(name)) { const v = decodeURIComponent(c.substring(name.length)); if (v) return v; }
+      }
+    } catch(e) {}
     if (store._mem[k]) return store._mem[k];
     return '';
   },
@@ -1350,6 +1370,7 @@ const store = {
     store._mem[k] = v;
     try { sessionStorage.setItem(k, v); } catch(e) {}
     try { localStorage.setItem(k, v); }  catch(e) {}
+    _saveCookie('dl_' + k, v, 365);
   },
   clear(k) {
     try { localStorage.removeItem(k); } catch(e) {}
@@ -3040,6 +3061,9 @@ function saveConfig() {
   API_KEY  = document.getElementById('cfg-key').value.trim();
   store.set('api_base', API_BASE);
   store.set('api_key',  API_KEY);
+  // Cookie longue durée (365j) — survit à Safari ITP et mode privé iOS
+  _saveCookie('dl_api_base', API_BASE, 365);
+  _saveCookie('dl_api_key',  API_KEY,  365);
   document.getElementById('api-url-input').value = API_BASE;
   document.getElementById('api-key-input').value  = API_KEY;
   toast('Config sauvegardée !', 'success');
@@ -4488,6 +4512,8 @@ async function mobileConnect() {
     API_KEY  = key;
     store.set('api_base', url);
     store.set('api_key',  key);
+    _saveCookie('dl_api_base', url, 365);
+    _saveCookie('dl_api_key',  key, 365);
 
     // Sync topbar inputs
     const topUrl = document.getElementById('api-url-input');
@@ -4645,6 +4671,27 @@ window.addEventListener('DOMContentLoaded', () => {
 console.log('%c DataLinkedAI v13.0.2 ✅', 'color:#1A56FF;font-weight:bold;font-size:14px');
 
 // -- LIEN MOBILE / QR CODE -----------------------------------------
+function copyPermLink() {
+  if (!API_BASE) { toast('Configure l\'URL backend d\'abord !', 'error'); return; }
+  const params = 'api=' + encodeURIComponent(API_BASE) +
+                 (API_KEY ? '&key=' + encodeURIComponent(API_KEY) : '');
+  const url = API_BASE + '/dashboard#' + params;
+  navigator.clipboard.writeText(url)
+    .then(() => toast('✅ Lien copié ! Colle-le dans Safari iPhone et mets-le en favori.', 'success'))
+    .catch(() => {
+      // Fallback: show in prompt for manual copy
+      const box = document.createElement('div');
+      box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem';
+      box.innerHTML = \`<div style="background:#fff;border-radius:14px;padding:1.5rem;max-width:500px;width:100%">
+        <h3 style="margin:0 0 .75rem;font-size:1rem">🔗 Ton lien permanent</h3>
+        <p style="font-size:.78rem;color:#64748b;margin-bottom:.75rem">Copie ce lien et mets-le en favori sur iPhone — il contient déjà ton URL et ta clé.</p>
+        <textarea style="width:100%;box-sizing:border-box;font-size:.72rem;font-family:monospace;padding:.5rem;border:1px solid #e2e8f0;border-radius:8px;height:80px" readonly>\${url}</textarea>
+        <button onclick="this.closest('div').parentElement.remove()" style="margin-top:.75rem;padding:.5rem 1rem;background:#1A56FF;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%">Fermer</button>
+      </div>\`;
+      document.body.appendChild(box);
+    });
+}
+
 function showConnectQR() {
   if (!API_BASE) { toast('Configure l\'URL backend d\'abord !', 'error'); return; }
   // Utilise le HASH (#) — jamais envoyé au serveur, fonctionne sur iOS Safari privé
